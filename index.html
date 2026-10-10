@@ -67,7 +67,9 @@ button,select,input{font-family:inherit;font-size:13px}
     <span id="modeBadge">编辑模式</span>
     <button class="tb run" id="btnRun" title="运行 / 继续 (Space)">▶ 运行</button>
     <button class="tb pause" id="btnPause" title="暂停 (Space)" disabled>⏸ 暂停</button>
-    <button class="tb reset" id="btnReset" title="重置：恢复到运行前的装配布局" disabled>⟲ 重置</button>
+    <button class="tb reset" id="btnReset" title="重置：恢复到“初始状态”（编辑模式下初始状态自动跟随当前布局）" disabled>⟲ 重置</button>
+    <button class="tb" id="btnSetInit" title="把当前姿态/布局设为初始状态，之后每次重置都回到这里">设为初始状态</button>
+    <button class="tb" id="btnSetInitRun" title="暂停在某个姿态后，把它冻结为新的初始状态（速度清零）" disabled>将当前运行状态设为初始状态</button>
     <span class="sep"></span>
     <label><input type="checkbox" id="chkGravity" checked> 重力</label>
     <label>速度 <select id="selSpeed">
@@ -91,8 +93,11 @@ button,select,input{font-family:inherit;font-size:13px}
     <div id="palette">
       <h3>零件库（拖到画布）</h3>
       <div class="pal" id="palItems"></div>
+      <h3>传动零件</h3>
+      <div class="pal" id="palTrans"></div>
       <h3>连接工具</h3>
       <div class="tools" id="palTools"></div>
+      <label style="display:block;margin-top:6px;font-size:12px;color:#4b5563"><input type="checkbox" id="chkAuto" checked> 自动检测啮合（节圆相切）</label>
       <div class="legend">
         <span><span class="key">Space</span>运行/暂停</span><span><span class="key">Del</span>删除</span><span><span class="key">Esc</span>取消</span>
         <span><span class="key">R</span>旋转15°</span><span><span class="key">Ctrl+Z/Y</span>撤销重做</span><span><span class="key">Ctrl+D</span>复制</span>
@@ -262,6 +267,79 @@ const Phys = (function () {
     }
   }
 
+
+  // ---------- 传动约束 (通用速度级一行约束：Jv + b = 0，可单边/带扭矩上限/效率/自锁) ----------
+  // J = [jvA(x,y), jwA, jvB(x,y), jwB]，由 upd(row,h) 每个子步按几何更新；用于齿轮/皮带/齿条/丝杠/凸轮/槽轮/棘轮/离合器等。
+  class Row {
+    constructor(o) {
+      this.A = o.A; this.B = o.B; this.upd = o.upd; this.id = o.id; this.kind = o.kind || '';
+      this.unilateral = !!o.unilateral;      // true: 冲量 ≥ 0 (接触/棘轮)
+      this.eff = o.eff == null ? 1 : o.eff;  // 传递效率：输出侧冲量按 eff 折减
+      this.lock = !!o.lock;                  // 自锁：被动侧不能反向驱动主动侧
+      this.limitT = o.limitT || 0;           // 打滑扭矩上限(折算到 A 轴, N·m)，0=不限
+      this.beta = o.beta == null ? 0.1 : o.beta; this.maxBias = o.maxBias || 25;
+      this.L = 0; this.c0 = null; this.slip = false; this.on = true; this.abs = false;
+      this.sA = 1; this.sB = 1; this.lim = Infinity;
+      this.jvAx = 0; this.jvAy = 0; this.jwA = 0; this.jvBx = 0; this.jvBy = 0; this.jwB = 0; this.C = 0;
+      this.tAS = 0; this.tBS = 0; this.fAS = 0; this.fBS = 0; this.nS = 0;
+      this.tqA = 0; this.tqB = 0; this.fA = 0; this.fB = 0; this.data = {};
+    }
+    pos(raw) { if (this.c0 === null || this.slip) this.c0 = raw; this.C = raw - this.c0; }
+    pre(h) {
+      const A = this.A, B = this.B; this.h = h;
+      this.jvAx = this.jvAy = this.jwA = this.jvBx = this.jvBy = this.jwB = 0; this.C = 0; this.abs = false;
+      const r = this.upd(this, h);
+      this.on = r !== false && !(A.im === 0 && B.im === 0);
+      if (!this.on) { this.L = 0; this.sA = this.sB = 1; return; }
+      const jA2 = A.im * (this.jvAx * this.jvAx + this.jvAy * this.jvAy) + A.ii * this.jwA * this.jwA;
+      const jB2 = B.im * (this.jvBx * this.jvBx + this.jvBy * this.jvBy) + B.ii * this.jwB * this.jwB;
+      let sA = 1, sB = 1;
+      if (this.eff < 1 || this.lock) {
+        const pA = this.L * (this.jvAx * A.vx + this.jvAy * A.vy + this.jwA * A.w);
+        const pB = this.L * (this.jvBx * B.vx + this.jvBy * B.vy + this.jwB * B.w);
+        const eps = 1e-10;
+        if (pA < -eps && pA <= pB) sB = this.eff;                    // A 为主动侧
+        else if (pB < -eps) { sA = this.lock ? 0 : this.eff; }       // B 为主动侧(自锁：A 不受力)
+        else if (this.lock) sA = 0;                                   // 静止：自锁
+      }
+      this.sA = sA; this.sB = sB;
+      this.K = sA * jA2 + sB * jB2; if (this.K < 1e-12) { this.on = false; this.L = 0; return; }
+      // 冲量范围
+      let lo = this.unilateral ? 0 : -Infinity, hi = Infinity;
+      if (this.limitT > 0) {
+        const sc = Math.max(Math.hypot(this.jwA, this.jvAx, this.jvAy), 1e-9); const Lm = this.limitT * h / sc;
+        hi = Lm; if (!this.unilateral) lo = -Lm;
+      }
+      this.loL = lo; this.hiL = hi;
+      if (this.L < lo) this.L = lo; if (this.L > hi) this.L = hi;
+      // 偏置
+      const C = this.C;
+      if (this.unilateral) this.bias = C > 0 ? C / h : this.beta / h * C;
+      else this.bias = Math.max(-this.maxBias, Math.min(this.maxBias, this.beta / h * C));
+      // 热启动
+      const L = this.L;
+      A.vx += sA * A.im * L * this.jvAx; A.vy += sA * A.im * L * this.jvAy; A.w += sA * A.ii * L * this.jwA;
+      B.vx += sB * B.im * L * this.jvBx; B.vy += sB * B.im * L * this.jvBy; B.w += sB * B.ii * L * this.jwB;
+    }
+    solve() {
+      if (!this.on) return;
+      const A = this.A, B = this.B, sA = this.sA, sB = this.sB;
+      const Jv = this.jvAx * A.vx + this.jvAy * A.vy + this.jwA * A.w + this.jvBx * B.vx + this.jvBy * B.vy + this.jwB * B.w;
+      let imp = -(Jv + this.bias) / this.K;
+      const nl = max(this.loL, min(this.hiL, this.L + imp)); imp = nl - this.L; this.L = nl;
+      A.vx += sA * A.im * imp * this.jvAx; A.vy += sA * A.im * imp * this.jvAy; A.w += sA * A.ii * imp * this.jwA;
+      B.vx += sB * B.im * imp * this.jvBx; B.vy += sB * B.im * imp * this.jvBy; B.w += sB * B.ii * imp * this.jwB;
+    }
+    post() {
+      if (!this.on) return;
+      const h = this.h, L = this.L;
+      this.slip = this.limitT > 0 && Math.abs(L) >= this.hiL * 0.999;
+      this.tAS += this.sA * L * this.jwA / h; this.tBS += this.sB * L * this.jwB / h;
+      this.fAS += this.sA * L * Math.hypot(this.jvAx, this.jvAy) / h; this.fBS += this.sB * L * Math.hypot(this.jvBx, this.jvBy) / h;
+      this.nS++;
+    }
+  }
+
   // ---------- 碰撞检测 ----------
   const MARGIN = 0.01;
   function collideCC(A, B) {
@@ -356,7 +434,7 @@ const Phys = (function () {
   // ---------- 世界 ----------
   class World {
     constructor() {
-      this.bodies = []; this.joints = []; this.springs = []; this.pairs = [];
+      this.bodies = []; this.joints = []; this.springs = []; this.pairs = []; this.rows = [];
       this.g = 9.81; this.h = 1 / 600; this.iters = 12; this.arb = new Map(); this.contacts = [];
       this.time = 0; this.grab = null; this.nsubFrame = 0;
     }
@@ -406,9 +484,9 @@ const Phys = (function () {
       if (this.grab) {
         const gr = this.grab, b = gr.body; if (b.im !== 0) {
           const p = b.toWorld(gr.local), v = b.velAt(gr.local);
-          const w0 = 12, kk = w0 * w0, cc = 2 * 0.8 * w0;
+          const w0 = gr.w0 || 12, kk = w0 * w0, cc = 2 * (gr.zeta || 0.8) * w0;
           let fx = b.m * (kk * (gr.tx - p[0]) - cc * v[0]), fy = b.m * (kk * (gr.ty - p[1]) - cc * v[1]);
-          const fm = sqrt(fx * fx + fy * fy), lim = b.m * this.g * 12; if (fm > lim) { fx *= lim / fm; fy *= lim / fm; }
+          const fm = sqrt(fx * fx + fy * fy), lim = gr.lim || b.m * max(this.g, 2) * 12; if (fm > lim) { fx *= lim / fm; fy *= lim / fm; }
           this.addForce(b, p, fx, fy);
         }
       }
@@ -485,11 +563,14 @@ const Phys = (function () {
       }
       this.detect();
       for (const j of this.joints) j.pre(h);
+      for (const r of this.rows) r.pre(h);
       this.preContacts(h);
       for (let it = 0; it < this.iters; it++) {
         for (const j of this.joints) j.solve();
+        for (const r of this.rows) r.solve();
         this.solveContacts();
       }
+      for (const r of this.rows) r.post();
       // 反力统计
       for (const j of this.joints) {
         if (j.dead) continue;
@@ -508,7 +589,7 @@ const Phys = (function () {
         b.rfxS = (b.rfxS || 0) + b.rfx; b.rfyS = (b.rfyS || 0) + b.rfy;
         const sp = b.vx * b.vx + b.vy * b.vy;
         if (sp > 2500) { const f = 50 / sqrt(sp); b.vx *= f; b.vy *= f; }
-        if (abs(b.w) > 200) b.w = 200 * Math.sign(b.w);
+        const wm = b.wmax || 200; if (abs(b.w) > wm) b.w = wm * Math.sign(b.w);
         b.x += h * b.vx; b.y += h * b.vy; b.a += h * b.w;
       }
       for (const s of this.springs) { s.fS = (s.fS || 0) + s.fsum; s.nS = (s.nS || 0) + 1; }
@@ -523,6 +604,7 @@ const Phys = (function () {
         b.netx = b.nety = b.nsub = 0; b.rfxS = b.rfyS = 0;
       }
       for (const j of this.joints) { const n = j.fn || 1; j.fAvgX = (j.fxS || 0) / n; j.fAvgY = (j.fyS || 0) / n; j.tAvg = (j.torqS || 0) / n; j.fxS = j.fyS = j.fn = j.torqS = 0; }
+      for (const r of this.rows) { const n = r.nS || 1; r.tqA = r.tAS / n; r.tqB = r.tBS / n; r.fA = r.fAS / n; r.fB = r.fBS / n; r.tAS = r.tBS = r.fAS = r.fBS = 0; r.nS = 0; }
       for (const s of this.springs) { const n = s.nS || 1; s.fAvg = (s.fS || 0) / n; s.fS = 0; s.nS = 0; }
     }
     energy() {
@@ -536,7 +618,7 @@ const Phys = (function () {
       return { ke, pg, ps, total: ke + pg + ps };
     }
   }
-  return { World, Body, Joint };
+  return { World, Body, Joint, Row };
 })();
 if (typeof module !== 'undefined') module.exports = Phys;
 /* ===================== 数据模型 ===================== */
@@ -559,8 +641,8 @@ const TYPES = {
   ball: { label: '重物/球', layer: 6, dyn: true }
 };
 const JTYPES = { pin: '铰链', slide: '滑动副', weld: '固定连接' };
-const isForce = c => c && TYPES[c.type].force;
-const isStatic = c => !TYPES[c.type].dyn && !TYPES[c.type].force;
+const isForce = c => c && TYPES[c.type].force;   // 弹簧/阻尼器（力元件）
+const isStatic = c => !TYPES[c.type].dyn && !TYPES[c.type].force && !TYPES[c.type].line;
 const isDyn = c => TYPES[c.type].dyn;
 
 let M = { comps: [], joints: [], nextId: 1, nextJ: 1, counters: {} };
@@ -577,21 +659,21 @@ function defProps(type) {
     case 'spring': return { L: 100, k: 200, c: 1, restLen: 100, restAuto: true };
     case 'damper': return { L: 100, k: 0, c: 20, restLen: 100, restAuto: true };
   }
-  return {};
+  return trDefProps(type) || {};
 }
 function newComp(type, x, y, over) {
   const c = Object.assign({ id: 'c' + (M.nextId++), type, x, y, a: 0, mat: '钢', collide: true, trace: false, tracePt: 0 }, defProps(type), over || {});
   const mt = MATS[c.mat] || MATS['钢'];
   if (c.mu == null) c.mu = mt.mu; if (c.e == null) c.e = mt.e;
   if (type === 'ball' && over && over.e == null && c.mat === '钢') c.e = 0.5;
-  if (isForce(c) || type === 'anchor' || type === 'motor') c.collide = false;
+  if (isLine(c) || isTr(c) || type === 'anchor' || type === 'motor') c.collide = false;
   M.counters[type] = (M.counters[type] || 0) + 1;
   if (!c.name) c.name = TYPES[type].label + M.counters[type];
   M.comps.push(c); return c;
 }
 const compById = id => id == null ? null : M.comps.find(c => c.id === id) || null;
 const jointById = id => M.joints.find(j => j.id === id) || null;
-const jointsOf = id => M.joints.filter(j => j.a === id || j.b === id);
+const jointsOf = id => M.joints.filter(j => jointHas(j, id));
 
 function volume(c) { // m^3
   switch (c.type) {
@@ -601,7 +683,7 @@ function volume(c) { // m^3
     case 'ball': return 4 / 3 * Math.PI * Math.pow(c.r / 100, 3);
     case 'ground': return c.w * c.h * 10 / 1e6;
   }
-  return 0;
+  return trVolume(c);
 }
 function autoMass(c) { return (MATS[c.mat] || MATS['钢']).rho * volume(c); }
 function compMass(c) { if (!isDyn(c)) return 0; return c.massManual ? c.mass : autoMass(c); }
@@ -612,7 +694,7 @@ function compInertia(c, m) { // kg m^2
     case 'wheel': return 0.5 * m * c.r * c.r / 1e4;
     case 'ball': return 0.4 * m * c.r * c.r / 1e4;
   }
-  return 1;
+  return isTr(c) ? trInertia(c, m) : 1;
 }
 function dimsText(c) {
   switch (c.type) {
@@ -624,19 +706,19 @@ function dimsText(c) {
     case 'spring': case 'damper': return `L${r1(c.L)}`;
     case 'anchor': return '-'; case 'motor': return '-';
   }
-  return '-';
+  return isTr(c) ? trDims(c) : '-';
 }
 const r1 = v => Math.round(v * 10) / 10;
 
 /* ---- 几何 ---- */
 function wpt(c, l) { const cs = Math.cos(c.a), sn = Math.sin(c.a); l = lp(c, l); return [c.x + cs * l[0] - sn * l[1], c.y + sn * l[0] + cs * l[1]]; }
 function toLocal(c, x, y) { const cs = Math.cos(c.a), sn = Math.sin(c.a), dx = x - c.x, dy = y - c.y; return [cs * dx + sn * dy, -sn * dx + cs * dy]; }
-function lp(c, l) { if (c && isForce(c)) return [(l[0] >= 0 ? 1 : -1) * c.L / 2, 0]; return l; }
+function lp(c, l) { if (c && isLine(c)) return [(l[0] >= 0 ? 1 : -1) * c.L / 2, 0]; return l; }
 function pts(c) {
   const P = (n, x, y) => ({ n, l: [x, y] });
   switch (c.type) {
     case 'rod': return [P('端点A', -c.L / 2, 0), P('端点B', c.L / 2, 0), P('中心', 0, 0)];
-    case 'spring': case 'damper': return [P('端点A', -c.L / 2, 0), P('端点B', c.L / 2, 0)];
+    case 'spring': case 'damper': case 'clutch': case 'gearbox': case 'ujoint': return [P('端点A', -c.L / 2, 0), P('端点B', c.L / 2, 0)];
     case 'wheel': return [P('中心', 0, 0), P('右缘', c.r, 0), P('下缘', 0, c.r), P('左缘', -c.r, 0), P('上缘', 0, -c.r)];
     case 'ball': return [P('中心', 0, 0)];
     case 'block': case 'ground': {
@@ -645,12 +727,13 @@ function pts(c) {
         P('右下角', hx, hy), P('左下角', -hx, hy), P('左上角', -hx, -hy), P('右上角', hx, -hy)];
     }
   }
+  if (isTr(c) && !isLine(c)) return trPts(c);
   return [P('中心', 0, 0)];
 }
 function endPts(c) { const h = c.L / 2, cs = Math.cos(c.a), sn = Math.sin(c.a); return [[c.x - cs * h, c.y - sn * h], [c.x + cs * h, c.y + sn * h]]; }
 function setEnds(c, p1, p2) {
   const dx = p2[0] - p1[0], dy = p2[1] - p1[1]; const L = Math.max(10, Math.hypot(dx, dy));
-  const old = c.type === 'rod' || isForce(c) ? c.L : null;
+  const old = c.type === 'rod' || isLine(c) ? c.L : null;
   c.x = (p1[0] + p2[0]) / 2; c.y = (p1[1] + p2[1]) / 2;
   if (Math.hypot(dx, dy) > 1e-6) c.a = Math.atan2(dy, dx);
   c.L = L;
@@ -658,22 +741,28 @@ function setEnds(c, p1, p2) {
   if (isForce(c) && c.restAuto) c.restLen = L;
 }
 function rescaleJoints(c, fx, fy) {
-  if (isForce(c)) return;
+  if (isLine(c)) return;
   for (const j of M.joints) {
     if (j.a === c.id) { j.pa = [j.pa[0] * fx, j.pa[1] * fy]; }
     if (j.b === c.id) { j.pb = [j.pb[0] * fx, j.pb[1] * fy]; }
   }
 }
 function jointEndWorld(j, side) {
+  if (isTrJoint(j)) return trJointPoint(j);
   const id = side === 'a' ? j.a : j.b, p = side === 'a' ? j.pa : j.pb;
   const c = compById(id); if (!c) return [p[0], p[1]];
   return wpt(c, p);
 }
-function jointGap(j) { const a = jointEndWorld(j, 'a'), b = jointEndWorld(j, 'b'); return Math.hypot(a[0] - b[0], a[1] - b[1]); }
+function jointGap(j) {
+  if (isTrJoint(j)) return trJointGap(j);
+  const a = jointEndWorld(j, 'a'), b = jointEndWorld(j, 'b');
+  if (j.type === 'slide') { const ca = compById(j.a); const ang = (ca ? ca.a : 0) + (j.axis || 0); return Math.abs(-(b[0] - a[0]) * Math.sin(ang) + (b[1] - a[1]) * Math.cos(ang)); } // 沿轨道方向允许滑动
+  return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
 // 弹簧/阻尼器的端点跟随其所连接的零件（编辑模式）
 function syncSprings() {
   for (const c of M.comps) {
-    if (!isForce(c)) continue;
+    if (!isLine(c)) continue;
     const e = [wpt(c, [-1, 0]), wpt(c, [1, 0])]; let ch = false;
     for (const j of M.joints) {
       let sd = null, other = null;
@@ -691,7 +780,7 @@ function areaOf(c) {
     case 'wheel': case 'ball': return Math.PI * c.r * c.r; case 'spring': case 'damper': return c.L * 8;
     case 'motor': return 1600; case 'anchor': return 300;
   }
-  return 1000;
+  return isTr(c) ? trAreaOf(c) : 1000;
 }
 function hitComp(c, x, y, tol) {
   const l = toLocal(c, x, y);
@@ -703,7 +792,7 @@ function hitComp(c, x, y, tol) {
     case 'motor': return Math.hypot(l[0], l[1]) <= 24 + tol * 0.3;
     case 'anchor': return Math.hypot(l[0], l[1]) <= 14 + tol * 0.3 || (l[1] > 0 && l[1] < 20 && Math.abs(l[0]) < 14 - l[1] * 0.1);
   }
-  return false;
+  return isTr(c) ? trHit(c, l, tol) : false;
 }
 function longAxisAngle(c) { // 轨道方向(局部)
   if (c.type === 'rod') return 0;
@@ -715,7 +804,22 @@ const elongated = c => c.type === 'rod' || c.type === 'ground' || c.type === 'bl
 /* ---- 撤销/重做 ---- */
 const undoStack = [], redoStack = [];
 let pendingSnap = null;
-function snapJSON() { return JSON.stringify(M); }
+/* ---- 初始状态：M.init 保存各零件的初始位姿(速度恒为零)。编辑模式下始终与当前布局同步；运行后「重置」恢复它 ---- */
+function posesOf(m) {
+  const o = {};
+  for (const c of m.comps) { const p = { x: c.x, y: c.y, a: c.a }; if (isLine(c)) { p.L = c.L; p.restLen = c.restLen; } o[c.id] = p; }
+  return o;
+}
+function captureInit() { M.init = { poses: posesOf(M) }; }
+function applyInitTo(m, init) {
+  if (!init || !init.poses) return m;
+  for (const c of m.comps) { const p = init.poses[c.id]; if (!p) continue; c.x = p.x; c.y = p.y; c.a = p.a; if (p.L != null) { c.L = p.L; if (p.restLen != null) c.restLen = p.restLen; } }
+  m.init = JSON.parse(JSON.stringify(init)); return m;
+}
+function modelAtInit() { // 运行中/暂停时：运行前的装配 + 当前 M.init 指定的初始位姿
+  const m = JSON.parse(sim.snapshot); return applyInitTo(m, M.init);
+}
+function snapJSON() { if (sim.mode === 'edit') captureInit(); return JSON.stringify(M); }
 function beginEdit() { if (pendingSnap == null) pendingSnap = snapJSON(); }
 function endEdit() {
   if (pendingSnap == null) return false;
@@ -724,27 +828,450 @@ function endEdit() {
   pendingSnap = null; return ch;
 }
 function cancelEdit() { pendingSnap = null; }
+/* ===================== 传动零件：类型 / 参数 / 几何 / 啮合检测 =====================
+ * 传动零件沿用同一套 组件(comp)+连接(joint) 架构：
+ *  - 旋转件(齿轮/带轮/凸轮…)是普通刚体，用「铰链」装到固定点/电机/杆上；
+ *  - 线性件(齿条/螺母/从动件)是刚体，由隐式或手动「滑动副」导向；
+ *  - 联轴器/离合器/减速器/万向节是“两端件”（与弹簧同样用铰链端点连接两根轴）；
+ *  - 啮合/皮带/链条是新的连接类型(M.joints 里 type = mesh / belt / chain)，求解时变成引擎的 Row 约束。
+ * 长度单位 cm（1px=1cm），模数/链节距单位 mm，角度类参数面板中用度。 */
+const TR_ROT = ['gear', 'ring', 'bevel', 'worm', 'wormwheel', 'pulley', 'sprocket', 'cam', 'ratchet', 'gpin', 'geneva', 'flywheel', 'screw'];
+const TR_LIN = ['rack', 'follower', 'nut'];
+const TR_CONN = ['clutch', 'gearbox', 'ujoint'];
+Object.assign(TYPES, {
+  gear: { label: '齿轮', layer: 4.2, dyn: true, tr: true }, ring: { label: '内齿圈', layer: 4.0, dyn: true, tr: true },
+  rack: { label: '齿条', layer: 3.5, dyn: true, tr: true }, bevel: { label: '锥齿轮', layer: 4.2, dyn: true, tr: true },
+  worm: { label: '蜗杆', layer: 4.3, dyn: true, tr: true }, wormwheel: { label: '蜗轮', layer: 4.2, dyn: true, tr: true },
+  pulley: { label: '皮带轮', layer: 4.2, dyn: true, tr: true }, sprocket: { label: '链轮', layer: 4.2, dyn: true, tr: true },
+  cam: { label: '凸轮', layer: 4.4, dyn: true, tr: true }, follower: { label: '从动件', layer: 4.5, dyn: true, tr: true },
+  ratchet: { label: '棘轮棘爪', layer: 4.2, dyn: true, tr: true }, gpin: { label: '拨盘', layer: 4.4, dyn: true, tr: true },
+  geneva: { label: '槽轮', layer: 4.2, dyn: true, tr: true }, flywheel: { label: '飞轮', layer: 4.1, dyn: true, tr: true },
+  screw: { label: '丝杠', layer: 4.3, dyn: true, tr: true }, nut: { label: '螺母', layer: 4.4, dyn: true, tr: true },
+  clutch: { label: '联轴器/离合器', layer: 2.5, dyn: false, line: true, tr: true, conn: true },
+  gearbox: { label: '减速器', layer: 2.5, dyn: false, line: true, tr: true, conn: true },
+  ujoint: { label: '万向节', layer: 2.5, dyn: false, line: true, tr: true, conn: true }
+});
+Object.assign(JTYPES, { mesh: '啮合/接触', belt: '皮带', chain: '链条' });
+const isLine = c => !!c && !!TYPES[c.type] && !!(TYPES[c.type].force || TYPES[c.type].line);
+const isTr = c => !!c && !!TYPES[c.type] && !!TYPES[c.type].tr;
+const isConn = c => !!c && !!TYPES[c.type] && !!TYPES[c.type].conn;
+const isTrJoint = j => !!j && (j.type === 'mesh' || j.type === 'belt' || j.type === 'chain');
+const jointHas = (j, id) => j.a === id || j.b === id || (j.ids && j.ids.indexOf(id) >= 0);
+const D2R = Math.PI / 180, TAU = Math.PI * 2;
+const modP = (x, p) => ((x % p) + p) % p;
+
+function trDefProps(type) {
+  switch (type) {
+    case 'gear': return { m: 10, z: 20, t: 2 };
+    case 'ring': return { m: 10, z: 40, t: 2, rim: 8 };
+    case 'rack': return { m: 10, z: 12, h: 10, t: 2 };
+    case 'bevel': return { m: 10, z: 20, t: 2 };
+    case 'worm': return { r: 8, Lw: 70, starts: 1, axd: 0, t: 2 };
+    case 'wormwheel': return { m: 10, z: 30, t: 2 };
+    case 'pulley': return { r: 20, t: 2 };
+    case 'sprocket': return { z: 20, p: 25, t: 2 };
+    case 'cam': return { kind: 'harmonic', Rb: 30, R: 30, e: 12, h: 25, rise: 120, dwell: 60, ret: 120, t: 2 };
+    case 'follower': return { L: 70, w: 12, tip: 'knife', rr: 8, k: 800, pre: 3, t: 2 };
+    case 'ratchet': return { z: 16, r: 18, dir: 1, pawl: true, pawlAng: -90, t: 2 };
+    case 'gpin': return { r: 28, rp: 35, n: 4, t: 2 };
+    case 'geneva': return { n: 4, R: 40, t: 2, inner: false };
+    case 'flywheel': return { r: 30, ri: 22, t: 3 };
+    case 'screw': return { lead: 5, Ls: 150, r: 3, hand: 1, axd: 0, t: 2 };
+    case 'nut': return { w: 30, h: 24, t: 3 };
+    case 'clutch': return { L: 90, h: 36, maxT: 50, engaged: true, eff: 1 };
+    case 'gearbox': return { L: 110, h: 50, ratio: 5, rev: false, eff: 1 };
+    case 'ujoint': return { L: 90, h: 28, beta: 20 };
+  }
+  return null;
+}
+/* ---- 基本几何(cm) ---- */
+const addendum = c => (c.m || 10) / 10;                // 齿顶高 = 1 个模数
+const dedendum = c => 1.25 * (c.m || 10) / 10;
+function trR(c) { // 分度圆/节圆/工作半径
+  switch (c.type) {
+    case 'gear': case 'ring': case 'bevel': case 'wormwheel': return c.m * c.z / 20;
+    case 'sprocket': return c.p / (2 * Math.sin(Math.PI / c.z)) / 10;
+    case 'pulley': case 'worm': case 'flywheel': case 'ratchet': case 'gpin': case 'screw': return c.r;
+    case 'cam': return c.kind === 'ecc' ? c.R : c.Rb + c.h;
+    case 'geneva': return c.R;
+  }
+  return 10;
+}
+function rackLen(c) { return c.z * Math.PI * c.m / 10; }
+function extR(c) { // 外接圆半径(用于命中/适应视图/旋转手柄)
+  switch (c.type) {
+    case 'gear': case 'bevel': case 'wormwheel': return trR(c) + addendum(c);
+    case 'ring': return trR(c) + dedendum(c) + c.rim;
+    case 'sprocket': return trR(c) + 0.3 * c.p / 10;
+    case 'cam': return c.kind === 'ecc' ? c.R + c.e : c.Rb + c.h + (c.tipRR || 0);
+    case 'worm': return Math.max(c.r, c.Lw / 2);
+    case 'screw': return Math.max(c.r, c.Ls / 2);
+    case 'rack': return Math.hypot(rackLen(c) / 2, c.h / 2 + 2 * addendum(c));
+    case 'follower': return Math.hypot(c.w / 2, c.L / 2) + (c.tip === 'roller' ? c.rr : 0);
+    case 'nut': return Math.hypot(c.w, c.h) / 2;
+    case 'gpin': return Math.max(c.r, c.rp + 5);
+    case 'geneva': return c.R;
+  }
+  return trR(c);
+}
+function trVolume(c) { // m^3
+  const t = c.t || 1;
+  switch (c.type) {
+    case 'gear': case 'bevel': case 'wormwheel': case 'sprocket': case 'pulley': case 'ratchet': case 'geneva': return Math.PI * trR(c) ** 2 * t / 1e6;
+    case 'ring': { const R = trR(c) + dedendum(c) + c.rim, ri = trR(c) - addendum(c); return Math.PI * (R * R - ri * ri) * t / 1e6; }
+    case 'gpin': return Math.PI * c.r * c.r * t / 1e6;
+    case 'flywheel': return Math.PI * (c.r * c.r - c.ri * c.ri) * c.t / 1e6 * 1.1;
+    case 'cam': return Math.PI * (c.kind === 'ecc' ? c.R : c.Rb + c.h * 0.5) ** 2 * t / 1e6;
+    case 'worm': return Math.PI * c.r * c.r * c.Lw / 1e6;
+    case 'screw': return Math.PI * c.r * c.r * c.Ls / 1e6;
+    case 'rack': return rackLen(c) * c.h * t / 1e6;
+    case 'follower': return c.w * c.L * t / 1e6;
+    case 'nut': return c.w * c.h * t / 1e6;
+  }
+  return 0;
+}
+function trInertia(c, m) { // kg m^2 (绕转轴)
+  switch (c.type) {
+    case 'ring': { const R = trR(c) + dedendum(c) + c.rim, ri = trR(c) - addendum(c); return 0.5 * m * (R * R + ri * ri) / 1e4; }
+    case 'flywheel': return 0.5 * m * (c.r * c.r + c.ri * c.ri) / 1e4;
+    case 'worm': case 'screw': return 0.5 * m * c.r * c.r / 1e4;
+    case 'rack': return m * (rackLen(c) ** 2 + c.h ** 2) / 12 / 1e4;
+    case 'follower': return m * (c.w * c.w + c.L * c.L) / 12 / 1e4;
+    case 'nut': return m * (c.w * c.w + c.h * c.h) / 12 / 1e4;
+    case 'gpin': return 0.5 * m * c.r * c.r / 1e4;
+    default: { const r = trR(c); return 0.5 * m * r * r / 1e4; }
+  }
+}
+function trDims(c) {
+  switch (c.type) {
+    case 'gear': case 'bevel': case 'wormwheel': case 'ring': return `m${c.m} z${c.z} R${r1(trR(c))}`;
+    case 'rack': return `m${c.m} z${c.z} ${r1(rackLen(c))}×${r1(c.h)}`;
+    case 'worm': return `头数${c.starts} R${r1(c.r)}×${r1(c.Lw)}`;
+    case 'pulley': case 'flywheel': return `R${r1(c.r)}`;
+    case 'sprocket': return `z${c.z} p${c.p}mm R${r1(trR(c))}`;
+    case 'cam': return c.kind === 'ecc' ? `偏心圆 R${r1(c.R)} e${r1(c.e)}` : `Rb${r1(c.Rb)} h${r1(c.h)}`;
+    case 'follower': return `${r1(c.w)}×${r1(c.L)}`;
+    case 'ratchet': return `z${c.z} R${r1(c.r)}`;
+    case 'geneva': return `n${c.n} R${r1(c.R)}`;
+    case 'gpin': return `R${r1(c.r)} 销半径${r1(c.rp)}`;
+    case 'screw': return `导程${c.lead} L${r1(c.Ls)}`;
+    case 'nut': return `${r1(c.w)}×${r1(c.h)}`;
+    case 'clutch': case 'gearbox': case 'ujoint': return `L${r1(c.L)}`;
+  }
+  return '-';
+}
+function trParamText(c) {
+  const fmt = (...a) => a.join('; ');
+  switch (c.type) {
+    case 'gear': case 'bevel': case 'wormwheel': return fmt(`模数 ${c.m} mm`, `齿数 ${c.z}`, `分度圆半径 ${rd(trR(c))} cm`);
+    case 'ring': return fmt(`模数 ${c.m} mm`, `齿数 ${c.z}`, `节圆半径 ${rd(trR(c))} cm`, `轮缘宽 ${c.rim} cm`);
+    case 'rack': return fmt(`模数 ${c.m} mm`, `齿数 ${c.z}`, `长度 ${rd(rackLen(c))} cm`);
+    case 'worm': return fmt(`头数 ${c.starts}`, `半径 ${c.r} cm`, `长度 ${c.Lw} cm`, `轴向 ${rd(c.axd)}°`);
+    case 'pulley': return fmt(`半径 ${c.r} cm`);
+    case 'sprocket': return fmt(`齿数 ${c.z}`, `链节距 ${c.p} mm`, `节圆半径 ${rd(trR(c))} cm`);
+    case 'cam': return c.kind === 'ecc' ? fmt('偏心圆', `圆半径 ${c.R} cm`, `偏心距 ${c.e} cm`) : fmt(c.kind === 'harmonic' ? '简谐升程' : '等速升程', `基圆 ${c.Rb} cm`, `升程 ${c.h} cm`, `升角 ${c.rise}°`, `远休止角 ${c.dwell}°`, `回程角 ${c.ret}°`);
+    case 'follower': return fmt(c.tip === 'roller' ? `滚子 R${c.rr} cm` : '尖底', `弹簧 k=${c.k} N/m`, `预压 ${c.pre} cm`);
+    case 'ratchet': return fmt(`齿数 ${c.z}`, `半径 ${c.r} cm`, `方向 ${c.dir >= 0 ? '顺时针' : '逆时针'}`, `棘爪 ${c.pawl ? '啮合' : '脱开'}`);
+    case 'gpin': return fmt(`销半径 ${c.rp} cm`, `锁止弧半径 ${c.r} cm`);
+    case 'geneva': return fmt(`槽数 ${c.n}`, `半径 ${c.R} cm`, c.inner ? '内啮合(同向)' : '外啮合(反向)');
+    case 'flywheel': return fmt(`外径 ${c.r} cm`, `内径 ${c.ri} cm`);
+    case 'screw': return fmt(`导程 ${c.lead} cm/转`, `${c.hand >= 0 ? '右旋' : '左旋'}`, `轴向 ${rd(c.axd)}°`);
+    case 'nut': return '';
+    case 'clutch': return fmt(`最大传递扭矩 ${c.maxT} N·m`, c.engaged !== false ? '接合' : '分离', `效率 ${c.eff}`);
+    case 'gearbox': return fmt(`减速比 ${c.ratio}:1`, c.rev ? '输出反向' : '输出同向', `效率 ${c.eff}`);
+    case 'ujoint': return fmt(`夹角 ${c.beta}°`);
+  }
+  return '';
+}
+function trPts(c) {
+  const P = (n, x, y) => ({ n, l: [x, y] });
+  switch (c.type) {
+    case 'rack': { const hx = rackLen(c) / 2, hy = c.h / 2; return [P('中心', 0, 0), P('左端', -hx, 0), P('右端', hx, 0), P('上边中点', 0, -hy), P('下边中点', 0, hy)]; }
+    case 'follower': return [P('中心', 0, 0), P('尖端', 0, c.L / 2), P('尾端', 0, -c.L / 2)];
+    case 'nut': return [P('中心', 0, 0), P('左', -c.w / 2, 0), P('右', c.w / 2, 0), P('上', 0, -c.h / 2), P('下', 0, c.h / 2)];
+    default: { const r = Math.max(trR(c), 6); return [P('中心', 0, 0), P('右缘', r, 0), P('下缘', 0, r), P('左缘', -r, 0), P('上缘', 0, -r)]; }
+  }
+}
+function trHit(c, l, tol) { // l: 局部坐标
+  switch (c.type) {
+    case 'rack': return Math.abs(l[0]) <= rackLen(c) / 2 + tol * 0.4 && Math.abs(l[1]) <= c.h / 2 + 2 * addendum(c) + tol * 0.4;
+    case 'follower': return Math.abs(l[0]) <= c.w / 2 + tol * 0.5 && Math.abs(l[1]) <= c.L / 2 + tol * 0.5 + (c.tip === 'roller' ? c.rr : 0);
+    case 'nut': return Math.abs(l[0]) <= c.w / 2 + tol * 0.4 && Math.abs(l[1]) <= c.h / 2 + tol * 0.4;
+    case 'clutch': case 'gearbox': case 'ujoint': return Math.abs(l[0]) <= c.L / 2 + tol * 0.5 && Math.abs(l[1]) <= Math.max(c.h / 2, tol * 0.8);
+    case 'worm': case 'screw': { // 轴向矩形(与 axd 同向)
+      const a = (c.axd || 0) * D2R, cs = Math.cos(a), sn = Math.sin(a); const x = cs * l[0] + sn * l[1], y = -sn * l[0] + cs * l[1];
+      const hl = (c.type === 'worm' ? c.Lw : c.Ls) / 2; return Math.abs(x) <= hl + tol * 0.3 && Math.abs(y) <= c.r + tol * 0.5;
+    }
+  }
+  return Math.hypot(l[0], l[1]) <= extR(c) + tol * 0.5;
+}
+function trAreaOf(c) {
+  switch (c.type) { case 'rack': return rackLen(c) * (c.h + 4); case 'follower': return c.w * c.L; case 'nut': return c.w * c.h; case 'clutch': case 'gearbox': case 'ujoint': return c.L * 10; case 'worm': return c.Lw * c.r * 2; case 'screw': return c.Ls * c.r * 2; }
+  return Math.PI * extR(c) ** 2;
+}
+const trIconExt = { gear: 15, ring: 28, rack: 36, bevel: 15, worm: 40, wormwheel: 20, pulley: 22, sprocket: 14, cam: 28, follower: 40, ratchet: 20, gpin: 38, geneva: 40, flywheel: 32, screw: 55, nut: 22, clutch: 52, gearbox: 58, ujoint: 52 };
+
+/* ---- 凸轮轮廓（极坐标：ρ(φ)，φ 为凸轮局部极角；凸轮转角 δ = -φ） ---- */
+function camLift(c, d) { // d: 凸轮相对从动件转过的角度(度), 0..360 → 位移 0..h
+  d = modP(d, 360); const b1 = c.rise, b2 = c.ret, ds = c.dwell;
+  const harm = c.kind === 'harmonic';
+  if (d < b1) { const u = d / b1; return c.h * (harm ? (1 - Math.cos(Math.PI * u)) / 2 : u); }
+  if (d < b1 + ds) return c.h;
+  if (d < b1 + ds + b2) { const u = (d - b1 - ds) / b2; return c.h * (harm ? (1 + Math.cos(Math.PI * u)) / 2 : 1 - u); }
+  return 0;
+}
+function camRhoRaw(c, phi, rr) { // phi 弧度 → 节曲线半径(cm)
+  if (c.kind === 'ecc') { const R = c.R + rr, s = Math.sin(phi); return c.e * Math.cos(phi) + Math.sqrt(Math.max(R * R - c.e * c.e * s * s, 1e-6)); }
+  return c.Rb + rr + camLift(c, -phi / D2R);
+}
+function camTable(c, rr) { // 1440 点查表 (rho, drho/dphi) 单位 m
+  const N = 1440, rho = new Float64Array(N + 1), drho = new Float64Array(N + 1), dp = TAU / N;
+  for (let i = 0; i <= N; i++) rho[i] = camRhoRaw(c, i * dp, rr) / S;
+  for (let i = 0; i <= N; i++) { const a = rho[(i + N - 1) % N], b = rho[(i + 1) % N]; drho[i] = (b - a) / (2 * dp); }
+  return { N, dp, rho, drho, at(phi) { const x = modP(phi, TAU) / dp, i = Math.floor(x), f = x - i; return [rho[i] * (1 - f) + rho[i + 1] * f, drho[i] * (1 - f) + drho[i + 1] * f]; } };
+}
+/* ---- 槽轮 / 万向节 运动学函数 ---- */
+// 外槽轮: 槽轮转角 g(Θ) (Θ=拨盘销相对中心连线的转角)；返回 {g, gp}
+function genevaG(n, Th, inner) {
+  const lam = Math.sin(Math.PI / n), phm = Math.PI / 2 - Math.PI / n, sg = inner ? 1 : -1;
+  const Tf = Th - TAU * Math.round(Th / TAU), N = Math.round((Th - Tf) / TAU);
+  let psi, dp;
+  if (Math.abs(Tf) <= phm) { psi = Math.atan2(lam * Math.sin(Tf), 1 - lam * Math.cos(Tf)); dp = lam * (Math.cos(Tf) - lam) / (1 - 2 * lam * Math.cos(Tf) + lam * lam); }
+  else { psi = Math.sign(Tf) * Math.PI / n; dp = 0; }
+  return { g: sg * (psi + N * TAU / n), gp: sg * dp };
+}
+function ujointG(beta, th) { // θ2 = atan2(sinθ1, cosβ cosθ1) 展开
+  const cb = Math.cos(beta * D2R), s = Math.sin(th), c = Math.cos(th);
+  let t2 = Math.atan2(s, cb * c); t2 += TAU * Math.round((th - t2) / TAU);
+  return { g: t2, gp: cb / (s * s + cb * cb * c * c) };
+}
+
+/* ---- 啮合类型判定 ---- */
+const GEARISH = { gear: 1 };
+function meshKind(a, b) { // 返回 {kind, A, B}（规范化顺序）或 null
+  if (!a || !b || a === b) return null;
+  const ta = a.type, tb = b.type, pr = (k, A, B) => ({ kind: k, A, B });
+  if (ta === 'gear' && tb === 'gear') return pr('gear', a, b);
+  if (ta === 'gear' && tb === 'ring') return pr('ring', a, b); if (tb === 'gear' && ta === 'ring') return pr('ring', b, a);
+  if (ta === 'gear' && tb === 'rack') return pr('rack', a, b); if (tb === 'gear' && ta === 'rack') return pr('rack', b, a);
+  if (ta === 'bevel' && tb === 'bevel') return pr('bevel', a, b);
+  if (ta === 'worm' && tb === 'wormwheel') return pr('worm', a, b); if (tb === 'worm' && ta === 'wormwheel') return pr('worm', b, a);
+  if (ta === 'screw' && tb === 'nut') return pr('screw', a, b); if (tb === 'screw' && ta === 'nut') return pr('screw', b, a);
+  if (ta === 'gpin' && tb === 'geneva') return pr('geneva', a, b); if (tb === 'gpin' && ta === 'geneva') return pr('geneva', b, a);
+  if (ta === 'cam' && tb === 'follower') return pr('cam', a, b); if (tb === 'cam' && ta === 'follower') return pr('cam', b, a);
+  if (tb === 'ratchet' && (isTr(a) ? TR_ROT.indexOf(ta) >= 0 : (ta === 'rod' || ta === 'wheel'))) return pr('ratchet', a, b);
+  if (ta === 'ratchet' && (isTr(b) ? TR_ROT.indexOf(tb) >= 0 : (tb === 'rod' || tb === 'wheel'))) return pr('ratchet', b, a);
+  return null;
+}
+const MESH_NAMES = { gear: '外啮合齿轮副', ring: '内啮合(内齿圈)', rack: '齿轮-齿条', bevel: '锥齿轮副(90°简化)', worm: '蜗杆-蜗轮', screw: '丝杠-螺母', geneva: '拨盘-槽轮', cam: '凸轮-从动件', ratchet: '棘爪驱动' };
+function rackFrame(rk) { const u = [Math.cos(rk.a), Math.sin(rk.a)]; return { u, n: [-u[1], u[0]] }; }
+function rackSide(rk, P) { const f = rackFrame(rk); const d = (P[0] - rk.x) * f.n[0] + (P[1] - rk.y) * f.n[1]; return d >= 0 ? 1 : -1; }
+function screwAxis(sc) { const a = (sc.axd || 0) * D2R; return [Math.cos(a), Math.sin(a)]; }
+function ptLineDist(P, O, u) { const dx = P[0] - O[0], dy = P[1] - O[1]; return Math.abs(dx * u[1] - dy * u[0]); }
+function meshNominal(j, A, B) { // 名义转速比 ωB/ωA（旋转-旋转），其它返回 null
+  switch (j.kind) {
+    case 'gear': return -A.z / B.z; case 'ring': return A.z / B.z;
+    case 'bevel': return (j.rev === false ? 1 : -1) * A.z / B.z;
+    case 'worm': return (j.rev ? -1 : 1) * A.starts / B.z;
+    case 'geneva': return (B.inner ? 1 : -1) / B.n;  // 平均转角比
+  }
+  return null;
+}
+function meshGap(j) { // 中心距(几何)误差 cm
+  const A = compById(j.a), B = compById(j.b); if (!A || !B) return 0;
+  const d = Math.hypot(B.x - A.x, B.y - A.y);
+  switch (j.kind) {
+    case 'gear': case 'bevel': return Math.abs(d - trR(A) - trR(B));
+    case 'ring': return Math.abs(d - (trR(B) - trR(A)));
+    case 'rack': { const f = rackFrame(B); const dd = Math.abs((A.x - B.x) * f.n[0] + (A.y - B.y) * f.n[1]) - B.h / 2; return Math.abs(dd - trR(A)); }
+    case 'worm': { const u = screwAxis({ axd: A.axd }); return Math.abs(ptLineDist([B.x, B.y], [A.x, A.y], u) - trR(B) - A.r); }
+    case 'screw': return ptLineDist([B.x, B.y], [A.x, A.y], screwAxis(A));
+  }
+  return 0;
+}
+function meshModuleOK(j) { const A = compById(j.a), B = compById(j.b); if (!A || !B) return true; if (A.m != null && B.m != null && j.kind !== 'worm') return Math.abs(A.m - B.m) < 1e-6; return true; }
+function meshLabel(j) {
+  if (j.type === 'belt') return (j.crossed ? '交叉' : '开口') + '皮带';
+  if (j.type === 'chain') return '链条';
+  return MESH_NAMES[j.kind] || '啮合';
+}
+function trJointPoint(j) { // 连接标记位置(世界, cm)
+  if (j.type === 'mesh') {
+    const A = compById(j.a), B = compById(j.b); if (!A || !B) return [0, 0];
+    const d = Math.hypot(B.x - A.x, B.y - A.y) || 1, ux = (B.x - A.x) / d, uy = (B.y - A.y) / d;
+    if (j.kind === 'ring') { const R = trR(B); return [B.x + (A.x - B.x) / (d || 1) * R, B.y + (A.y - B.y) / (d || 1) * R]; }
+    if (j.kind === 'gear' || j.kind === 'bevel') { const r = trR(A); return [A.x + ux * r, A.y + uy * r]; }
+    if (j.kind === 'rack') { const f = rackFrame(B); const s = rackSide(B, [A.x, A.y]); const dd = (A.x - B.x) * f.n[0] + (A.y - B.y) * f.n[1]; return [A.x - f.n[0] * (dd - s * B.h / 2), A.y - f.n[1] * (dd - s * B.h / 2)]; }
+    return [(A.x + B.x) / 2, (A.y + B.y) / 2];
+  }
+  const cs = (j.ids || []).map(compById).filter(Boolean); if (cs.length < 2) return [0, 0];
+  return [(cs[0].x + cs[1].x) / 2, (cs[0].y + cs[1].y) / 2];
+}
+function trJointGap(j) {
+  if (j.type === 'mesh') return meshGap(j);
+  const cs = (j.ids || []).map(compById); if (cs.some(c => !c)) return 999; return 0;
+}
+/* ---- 自动啮合检测（节圆相切于标准中心距） ---- */
+function autoMeshList() {
+  const out = [], cs = M.comps.filter(c => c.type === 'gear' || c.type === 'ring' || c.type === 'rack');
+  const has = (a, b) => M.joints.some(j => j.type === 'mesh' && ((j.a === a.id && j.b === b.id) || (j.a === b.id && j.b === a.id)));
+  const gears = cs.filter(c => c.type === 'gear');
+  for (const g of gears) for (const o of cs) {
+    if (o === g) continue; if (o.type === 'gear' && o.id < g.id) continue;
+    const mk = meshKind(g, o); if (!mk || has(g, o)) continue;
+    if (Math.abs(g.m - o.m) > 1e-6) continue;
+    const j = { id: 'auto:' + mk.A.id + '|' + mk.B.id, type: 'mesh', kind: mk.kind, a: mk.A.id, b: mk.B.id, auto: true, eff: 1, rev: false };
+    const tol = Math.max(0.6, 0.03 * (trR(g) + (o.type === 'rack' ? 0 : trR(o))));
+    if (meshGap(j) > tol) continue;
+    if (mk.kind === 'rack') { const f = rackFrame(mk.B); const x = (mk.A.x - mk.B.x) * f.u[0] + (mk.A.y - mk.B.y) * f.u[1]; if (Math.abs(x) > rackLen(mk.B) / 2 + trR(mk.A)) continue; }
+    if (mk.kind === 'ring') { const d = Math.hypot(mk.A.x - mk.B.x, mk.A.y - mk.B.y); if (d > trR(mk.B)) continue; }
+    out.push(j);
+  }
+  return out;
+}
+const allMeshJoints = () => M.joints.filter(isTrJoint).concat(sim.autoMesh ? autoMeshList() : []);
+/* ---- 齿形相位（仅用于绘制，保证啮合齿轮的齿嵌入对方齿隙） ---- */
+function trPhases() {
+  const off = {}, shift = {}, js = allMeshJoints().filter(j => j.type === 'mesh' && (j.kind === 'gear' || j.kind === 'ring' || j.kind === 'rack'));
+  const vis = c => c.a + (off[c.id] || 0);
+  const adj = {}; for (const j of js) { (adj[j.a] = adj[j.a] || []).push(j); (adj[j.b] = adj[j.b] || []).push(j); }
+  const done = {};
+  const roots = M.comps.filter(c => adj[c.id] && c.type !== 'rack');
+  for (const r of roots) {
+    if (done[r.id]) continue; done[r.id] = true; off[r.id] = 0; const q = [r];
+    while (q.length) {
+      const K = q.shift();
+      for (const j of adj[K.id] || []) {
+        const U = compById(j.a === K.id ? j.b : j.a); if (!U) continue;
+        if (U.type === 'rack') { // 小齿轮已知 → 齿条平移相位
+          const Pn = K, side = rackSide(U, [Pn.x, Pn.y]), f = rackFrame(U);
+          const phiP = Math.atan2(-side * f.n[1], -side * f.n[0]);
+          const tP = Pn.z * (phiP - vis(Pn)) / TAU, p = Math.PI * U.m / 10;
+          const tk = side > 0 ? (tP - 0.5) : (0.5 - tP);
+          const xc = (Pn.x - U.x) * f.u[0] + (Pn.y - U.y) * f.u[1];
+          shift[U.id] = xc - p * tk; continue;
+        }
+        if (done[U.id]) continue; done[U.id] = true;
+        if (j.kind === 'ring') {
+          const P = j.a === K.id && K.type === 'gear' ? K : (U.type === 'gear' ? U : K), R = P === K ? U : K;
+          const al = Math.atan2(P.y - R.y, P.x - R.x);
+          if (K === P) { const tP = P.z * (al - vis(P)) / TAU, tR = tP - 0.5; off[R.id] = al - TAU * tR / R.z - R.a; }
+          else { const tR = R.z * (al - vis(R)) / TAU, tP = tR + 0.5; off[P.id] = al - TAU * tP / P.z - P.a; }
+        } else {
+          const ph = Math.atan2(U.y - K.y, U.x - K.x), tK = K.z * (ph - vis(K)) / TAU;
+          off[U.id] = ph + Math.PI - TAU * (0.5 - tK) / U.z - U.a;
+        }
+        q.push(U);
+      }
+    }
+  }
+  // 孤立的齿条(未与齿轮啮合)无需相位
+  return { off, shift };
+}
+/* ---- 连接创建 ---- */
+function newTrJoint(o) { const j = Object.assign({ id: 'j' + (M.nextJ++), pa: [0, 0], pb: [0, 0], collideConnected: false, eff: 1 }, o); M.joints.push(j); return j; }
+function createMesh(ca, cb, opts) { // 返回 joint 或 null；并在编辑模式下自动对齐中心距/相位
+  const mk = meshKind(ca, cb); if (!mk) { setMsg('这两个零件之间没有可用的啮合/接触关系'); return null; }
+  const A = mk.A, B = mk.B;
+  if (M.joints.some(j => j.type === 'mesh' && j.a === A.id && j.b === B.id)) { setMsg('已存在相同的啮合连接'); return null; }
+  const j = newTrJoint(Object.assign({ type: 'mesh', kind: mk.kind, a: A.id, b: B.id }, mk.kind === 'bevel' ? { rev: true } : {}, mk.kind === 'worm' ? { lock: false } : {}, opts || {}));
+  trAlignMesh(j);
+  return j;
+}
+function trFree(c) { return !M.joints.some(x => !isTrJoint(x) && (x.a === c.id || x.b === c.id)); }
+function trAlignMesh(j) { // 无其它约束时把 B 移到标准中心距；槽轮/凸轮设置装配相位
+  const A = compById(j.a), B = compById(j.b); if (!A || !B) return;
+  const d = Math.hypot(B.x - A.x, B.y - A.y) || 1, ux = (B.x - A.x) / d, uy = (B.y - A.y) / d;
+  const mv = (c, x, y) => { c.x = x; c.y = y; };
+  if (j.kind === 'gear' || j.kind === 'bevel') { if (trFree(B)) mv(B, A.x + ux * (trR(A) + trR(B)), A.y + uy * (trR(A) + trR(B))); else if (trFree(A)) mv(A, B.x - ux * (trR(A) + trR(B)), B.y - uy * (trR(A) + trR(B))); }
+  else if (j.kind === 'ring') { const dd = trR(B) - trR(A); if (trFree(A)) mv(A, B.x - ux * dd, B.y - uy * dd); }
+  else if (j.kind === 'geneva') {
+    const a = d, n = A.n || B.n; A.rp = Math.round(a * Math.sin(Math.PI / B.n) * 10) / 10; A.n = B.n; A.r = Math.round(Math.max(A.rp * 0.8, a - B.R * 0.92) * 10) / 10; if (A.r > a - 0.3 * B.R) A.r = Math.round((a - 0.3 * B.R) * 10) / 10;
+    const phc = Math.atan2(A.y - B.y, A.x - B.x); // 槽轮指向拨盘的方向
+    const Th = A.a - Math.atan2(B.y - A.y, B.x - A.x), G = genevaG(B.n, Th, B.inner);
+    B.a = phc + G.g;                                  // 槽 0 对准(中心连线)+当前相位
+  }
+  else if (j.kind === 'rack') { // 小齿轮在齿条的哪一侧：把齿轮移到节线上方/侧面
+    const f = rackFrame(B), s = rackSide(B, [A.x, A.y]); const dd = (A.x - B.x) * f.n[0] + (A.y - B.y) * f.n[1];
+    const want = s * (B.h / 2 + trR(A)); if (trFree(A)) { A.x += f.n[0] * (want - dd); A.y += f.n[1] * (want - dd); }
+  }
+  else if (j.kind === 'worm') { const u = screwAxis(A); const dd = (B.x - A.x) * (-u[1]) + (B.y - A.y) * u[0]; const s = dd >= 0 ? 1 : -1; const want = s * (trR(B) + A.r); if (trFree(B)) { B.x += -u[1] * (want - dd); B.y += u[0] * (want - dd); } }
+  else if (j.kind === 'screw') { const u = screwAxis(A); const dd = (B.x - A.x) * (-u[1]) + (B.y - A.y) * u[0]; if (trFree(B)) { B.x -= -u[1] * dd; B.y -= u[0] * dd; } B.a = Math.atan2(u[1], u[0]); }
+  else if (j.kind === 'cam') { const f = B; /* 从动件轴线朝向凸轮中心 */ }
+}
+function createBelt(type, ids, opts) { // type: belt|chain
+  ids = ids.filter((v, i) => ids.indexOf(v) === i); if (ids.length < 2) return null;
+  const ok = type === 'belt' ? (c => c && c.type === 'pulley') : (c => c && c.type === 'sprocket');
+  if (!ids.every(id => ok(compById(id)))) { setMsg(type === 'belt' ? '皮带只能连接皮带轮' : '链条只能连接链轮'); return null; }
+  return newTrJoint(Object.assign({ type, a: ids[0], b: ids[1], ids: ids.slice(), crossed: false, slipF: 0 }, opts || {}));
+}
+/* ---- 皮带/链条路径几何（绘制用） ---- */
+function beltGeometry(j) {
+  const cs = (j.ids || []).map(compById); if (cs.length < 2 || cs.some(c => !c)) return null;
+  const n = cs.length, R = cs.map(trR);
+  const cx = cs.reduce((s, c) => s + c.x, 0) / n, cy = cs.reduce((s, c) => s + c.y, 0) / n;
+  // 每个轮的包角方向 s_i: +1 = 皮带绕该轮顺时针(圆心在行进方向右侧)
+  const side = new Array(n).fill(1);
+  if (n === 2) { side[0] = 1; side[1] = j.type === 'belt' && j.crossed ? -1 : 1; }
+  else { let area = 0; for (let i = 0; i < n; i++) { const a = cs[i], b = cs[(i + 1) % n]; area += a.x * b.y - b.x * a.y; } side.fill(area > 0 ? 1 : -1); }
+  const legs = [];
+  for (let i = 0; i < n; i++) {
+    const k = (i + 1) % n, a = cs[i], b = cs[k], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d;
+    const si = side[i], sj = side[k], cross = si !== sj;
+    const kk = cross ? (R[i] + R[k]) / d : (R[i] - R[k]) / d, q = Math.sqrt(Math.max(0, 1 - kk * kk));
+    const px_ = si * uy, py_ = -si * ux;           // 从圆心指向皮带的法向(si=+1 时在行进方向左侧)
+    const nx = kk * ux + q * px_, ny = kk * uy + q * py_;
+    const p0 = [a.x + R[i] * nx, a.y + R[i] * ny], p1 = cross ? [b.x - R[k] * nx, b.y - R[k] * ny] : [b.x + R[k] * nx, b.y + R[k] * ny];
+    legs.push({ p0, p1, len: Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) });
+  }
+  const segs = []; let total = 0;
+  for (let i = 0; i < n; i++) {
+    const leg = legs[i], pl = legs[(i + n - 1) % n], c = cs[i];
+    segs.push({ t: 'L', x0: leg.p0[0], y0: leg.p0[1], x1: leg.p1[0], y1: leg.p1[1], len: leg.len, s0: total }); total += leg.len;
+    const k = (i + 1) % n, ck = cs[k], nxt = legs[k];
+    const a0 = Math.atan2(leg.p1[1] - ck.y, leg.p1[0] - ck.x), a1 = Math.atan2(nxt.p0[1] - ck.y, nxt.p0[0] - ck.x);
+    const sw = side[k] > 0 ? modP(a1 - a0, TAU) : -modP(a0 - a1, TAU), len = Math.abs(sw) * R[k];
+    segs.push({ t: 'A', cx: ck.x, cy: ck.y, r: R[k], a0, sw, len, s0: total }); total += len;
+  }
+  return { segs, total, side, cs, R };
+}
+function pathAt(geo, s) { // 弧长 s → 位置与切向
+  s = modP(s, geo.total);
+  for (const g of geo.segs) {
+    if (s <= g.s0 + g.len || g === geo.segs[geo.segs.length - 1]) {
+      const u = g.len > 0 ? Math.min(1, Math.max(0, (s - g.s0) / g.len)) : 0;
+      if (g.t === 'L') return { x: g.x0 + (g.x1 - g.x0) * u, y: g.y0 + (g.y1 - g.y0) * u, tx: (g.x1 - g.x0) / (g.len || 1), ty: (g.y1 - g.y0) / (g.len || 1) };
+      const a = g.a0 + g.sw * u, sg = Math.sign(g.sw) || 1;
+      return { x: g.cx + g.r * Math.cos(a), y: g.cy + g.r * Math.sin(a), tx: -Math.sin(a) * sg, ty: Math.cos(a) * sg };
+    }
+  }
+  return { x: 0, y: 0, tx: 1, ty: 0 };
+}
+/* ---- 通用查询：与某零件相关的传动连接 ---- */
+const trJointsOf = id => M.joints.filter(j => isTrJoint(j) && jointHas(j, id));
 /* ===================== 仿真装配 / 运行控制 ===================== */
 const sim = {
   mode: 'edit',           // edit | run | pause
   world: null, bodyOf: {}, snapshot: null, acc: 0, speed: 1, gravity: true,
   jointOf: {}, springOf: {}, e0: 0, energy: null,
+  autoMesh: true, rows: [], rowsOf: {}, trWarn: [], autoJ: [], fsp: {},
   traces: {}, plot: { t: [], x: [], y: [], v: [], id: null, last: -1 }, error: null, grab: null, lastSample: 0
 };
 
 function buildWorld() {
   const w = new Phys.World(); sim.world = w; sim.bodyOf = {}; sim.jointOf = {}; sim.springOf = {};
-  w.g = sim.gravity ? 9.81 : 0;
+  w.g = sim.gravity && !sim.dragMode ? 9.81 : 0;
   const W = w.addBody({ id: 'W', x: 0, y: 0, a: 0, static: true });
   sim.worldBody = W;
   for (const c of M.comps) {
-    if (isForce(c)) continue;
-    const st = isStatic(c);
+    if (isLine(c)) continue;
+    const st = isStatic(c) && !(sim.dragMode && sim.dragId === c.id);
     const o = { id: c.id, x: c.x / S, y: c.y / S, a: c.a, static: st, mu: c.mu, e: c.e, comp: c, collide: c.collide };
     if (c.type === 'rod') o.shape = { t: 'b', hx: (c.L + c.w) / 2 / S, hy: c.w / 2 / S };
     else if (c.type === 'block' || c.type === 'ground') o.shape = { t: 'b', hx: c.w / 2 / S, hy: c.h / 2 / S };
     else if (c.type === 'wheel' || c.type === 'ball') o.shape = { t: 'c', r: c.r / S };
     if (!st) { o.m = Math.max(compMass(c), 1e-3); o.I = Math.max(compInertia(c, o.m), 1e-6); }
+    if (sim.dragMode) { o.collide = false; if (!st) { const ex = dragExtent(c) / S; o.m = 1; o.I = Math.max(0.01, ex * ex / 3); o.linDamp = 60; o.angDamp = 60; } }
     if (st && (c.type === 'anchor' || c.type === 'motor')) o.collide = false;
     sim.bodyOf[c.id] = w.addBody(o);
   }
@@ -752,10 +1279,11 @@ function buildWorld() {
   const locFor = (id, p) => id == null ? [p[0] / S, p[1] / S] : [p[0] / S, p[1] / S];
   const springEnds = {}; // springId -> [attach0, attach1]
   for (const j of M.joints) {
+    if (isTrJoint(j)) continue;
     const ca = compById(j.a), cb = compById(j.b);
-    if (isForce(ca) || isForce(cb)) {
-      const sc = isForce(ca) ? ca : cb, sp = isForce(ca) ? j.pa : j.pb;
-      const oc = isForce(ca) ? cb : ca, op = isForce(ca) ? j.pb : j.pa;
+    if (isLine(ca) || isLine(cb)) {
+      const sc = isLine(ca) ? ca : cb, sp = isLine(ca) ? j.pa : j.pb;
+      const oc = isLine(ca) ? cb : ca, op = isLine(ca) ? j.pb : j.pa;
       const side = sp[0] >= 0 ? 1 : 0;
       const e = springEnds[sc.id] || (springEnds[sc.id] = [null, null]);
       if (!e[side]) e[side] = { body: oc ? sim.bodyOf[oc.id] : W, l: [op[0] / S, op[1] / S] };
@@ -763,7 +1291,7 @@ function buildWorld() {
     }
     let A = bodyFor(j.a), B = bodyFor(j.b), la = [j.pa[0] / S, j.pa[1] / S], lb = [j.pb[0] / S, j.pb[1] / S];
     let motor = null;
-    if (j.type === 'pin') {
+    if (j.type === 'pin' && !sim.dragMode) {
       let mc = null;
       if (ca && ca.type === 'motor') mc = ca; else if (cb && cb.type === 'motor') { mc = cb; [A, B] = [B, A]; [la, lb] = [lb, la]; }
       if (mc) {
@@ -785,7 +1313,7 @@ function buildWorld() {
     sim.jointOf[j.id] = J;
   }
   for (const c of M.comps) {
-    if (!isForce(c)) continue;
+    if (!isForce(c) || sim.dragMode) continue;
     const e = springEnds[c.id] || [null, null];
     const pts2 = [wpt(c, [-1, 0]), wpt(c, [1, 0])];
     const at = k => e[k] || { body: W, l: [pts2[k][0] / S, pts2[k][1] / S] };
@@ -793,6 +1321,7 @@ function buildWorld() {
     const sp = w.addSpring({ A: a.body, la: a.l, B: b.body, lb: b.l, k: c.type === 'damper' ? 0 : c.k, c: c.c || 0, L0: (c.type === 'damper' ? c.L : c.restLen) / S, comp: c });
     sim.springOf[c.id] = sp;
   }
+  buildTrans(w, W, springEnds);
   w.buildPairs();
   // 质量比自适应：相连刚体质量悬殊时增加迭代次数；极端悬殊时对过轻者设质量下限(1:1000)
   const jb = new Set(); for (const j of w.joints) { if (j.A.im > 0) jb.add(j.A); if (j.B.im > 0) jb.add(j.B); }
@@ -807,6 +1336,13 @@ function buildWorld() {
   w.iters = ratio <= 100 ? 24 : ratio <= 300 ? 60 : ratio <= 1000 ? 120 : 160;
 }
 
+function dragExtent(c) {
+  switch (c.type) {
+    case 'rod': return c.L / 2 + c.w; case 'wheel': case 'ball': return c.r; case 'block': case 'ground': return Math.hypot(c.w, c.h) / 2;
+    case 'motor': return 22; case 'anchor': return 14;
+  }
+  return isTr(c) ? extR(c) : 30;
+}
 function startRun() {
   if (sim.mode === 'run') return;
   if (sim.mode === 'pause') { sim.mode = 'run'; updateModeUI(); return; }
@@ -819,13 +1355,14 @@ function startRun() {
   sim.energy = sim.world.energy(); sim.e0 = sim.energy.total;
   afterSteps(true);
   updateModeUI(); renderProps();
-  if (sim.massWarn) setMsg('提示：相连零件质量相差超过 1000 倍，已按 1:1000 的质量比下限求解以保证稳定');
+  if (sim.trWarn.length) setMsg('提示：' + sim.trWarn.join('；'));
+  else if (sim.massWarn) setMsg('提示：相连零件质量相差超过 1000 倍，已按 1:1000 的质量比下限求解以保证稳定');
 }
 function pauseRun() { if (sim.mode === 'run') { sim.mode = 'pause'; updateModeUI(); } }
 function resetRun() {
   if (sim.mode === 'edit') return;
-  const sel = sel_.id;
-  M = JSON.parse(sim.snapshot);
+  const sel = sel_.id; const init = M.init;
+  M = JSON.parse(sim.snapshot); if (init) applyInitTo(M, init);
   sim.mode = 'edit'; sim.world = null; sim.grab = null; sim.traces = {}; sim.error = null;
   if (sel_.kind === 'comp' && !compById(sel)) sel_.id = null;
   updateModeUI(); renderProps(); setWarn('');
@@ -840,7 +1377,7 @@ function afterSteps(first) {
   const w = sim.world;
   w.harvest();
   for (const c of M.comps) {
-    if (isForce(c)) continue;
+    if (isLine(c)) continue;
     const b = sim.bodyOf[c.id]; if (!b || b.static) continue;
     if (!isFinite(b.x) || !isFinite(b.y) || !isFinite(b.a)) { sim.error = '数值发散'; continue; }
     c.x = b.x * S; c.y = b.y * S; c.a = b.a;
@@ -880,6 +1417,146 @@ function simulate(sec) {
   if (sim.mode !== 'run') return;
   const n = Math.round(sec * 60), per = Math.round(1 / 60 / sim.world.h);
   for (let i = 0; i < n; i++) { stepSim(per); afterSteps(); if (sim.mode !== 'run') break; }
+}
+/* ===================== 传动零件：求解器装配（M → Phys.Row） ===================== */
+function buildTrans(w, W, springEnds) {
+  sim.rows = []; sim.rowsOf = {}; sim.trWarn = []; sim.fsp = {};
+  sim.autoJ = sim.autoMesh ? autoMeshList() : [];
+  const bo = id => sim.bodyOf[id];
+  const warn = t => { if (sim.trWarn.indexOf(t) < 0) sim.trWarn.push(t); };
+  const add = (key, row) => { if (sim.dragMode && row.unilateral) return row; w.rows.push(row); sim.rows.push(row); (sim.rowsOf[key] = sim.rowsOf[key] || []).push(row); return row; };
+  const dynB = c => { const b = c && bo(c.id); return b && !b.static ? b : null; };
+  const hasSlide = c => M.joints.some(j => j.type === 'slide' && (j.a === c.id || j.b === c.id));
+  const guide = (c, ang) => {
+    const b = bo(c.id); if (!b || hasSlide(c)) return;
+    const jt = w.addJoint({ id: 'guide:' + c.id, type: 'slide', A: W, B: b, la: [b.x, b.y], lb: [0, 0], axisLocal: ang, refAngle: b.a - W.a });
+    jt.collideConnected = false;
+  };
+  // 旋转-旋转：ωB = ρ ωA
+  const ratioRow = (key, cA, cB, rho, o) => {
+    const A = dynB(cA), B = dynB(cB); if (!A || !B) { warn((cA ? cA.name : '?') + ' / ' + (cB ? cB.name : '?') + '：传动件需要先用铰链装到固定点/电机上（成为可转动刚体）'); return null; }
+    const r = new Phys.Row(Object.assign({ A, B, kind: 'ratio', upd(r) { r.jwA = -rho; r.jwB = 1; r.pos(B.a - rho * A.a); } }, o));
+    r.data = { mode: 'rr', cA, cB, nom: rho }; return add(key, r);
+  };
+  const ratioOpts = j => ({ eff: j.eff == null ? 1 : j.eff, lock: !!j.lock, limitT: j.maxT > 0 ? j.maxT : 0 });
+  const buildJoint = j => {
+    const key = j.id;
+    if (j.type === 'belt' || j.type === 'chain') {
+      const cs = (j.ids || []).map(compById); if (cs.some(c => !c)) return;
+      const n = cs.length;
+      for (let i = 0; i + 1 < n; i++) {
+        const a = cs[i], b = cs[i + 1];
+        const rho = j.type === 'chain' ? a.z / b.z : (n === 2 && j.crossed ? -1 : 1) * trR(a) / trR(b);
+        const o = ratioOpts(j); if (j.type === 'belt' && j.slipF > 0) o.limitT = j.slipF * trR(a) / S;
+        const r = ratioRow(key, a, b, rho, o); if (r) r.data.pair = i;
+      }
+      return;
+    }
+    const A0 = compById(j.a), B0 = compById(j.b); if (!A0 || !B0) return;
+    let A = A0, B = B0;
+    switch (j.kind) {
+      case 'gear': ratioRow(key, A, B, -A.z / B.z, ratioOpts(j)); break;
+      case 'ring': ratioRow(key, A, B, A.z / B.z, ratioOpts(j)); break;
+      case 'bevel': ratioRow(key, A, B, (j.rev === false ? 1 : -1) * A.z / B.z, ratioOpts(j)); break;
+      case 'worm': ratioRow(key, A, B, (j.rev ? -1 : 1) * (A.starts || 1) / B.z, Object.assign(ratioOpts(j), { lock: !!j.lock })); break;
+      case 'geneva': {
+        const dA = dynB(A), dB = dynB(B); if (!dA || !dB) { warn('槽轮机构：拨盘和槽轮都需要用铰链装到固定点/电机上'); break; }
+        const phc = Math.atan2(B.y - A.y, B.x - A.x), n = B.n, inner = !!B.inner;
+        const r = new Phys.Row(Object.assign({ A: dA, B: dB, kind: 'geneva', upd(r) { const G = genevaG(n, dA.a - phc, inner); r.jwA = -G.gp; r.jwB = 1; r.pos(dB.a - G.g); r.data.g = G; } }, ratioOpts(j)));
+        r.data = { mode: 'var', cA: A, cB: B, nom: (inner ? 1 : -1) / n, a0: dA.a, b0: dB.a }; add(key, r); break;
+      }
+      case 'rack': {
+        const pb = dynB(A), rb = dynB(B); if (!pb || !rb) { warn('齿轮齿条：小齿轮需铰链装到固定点/电机上，齿条需可动'); break; }
+        const sg = rackSide(B, [A.x, A.y]), rp = trR(A) / S; guide(B, B.a);
+        const r = new Phys.Row(Object.assign({ A: pb, B: rb, kind: 'rack', upd(r) {
+          const ux = Math.cos(rb.a), uy = Math.sin(rb.a);
+          r.jvAx = -ux; r.jvAy = -uy; r.jwA = -sg * rp; r.jvBx = ux; r.jvBy = uy;
+          r.pos((rb.x - pb.x) * ux + (rb.y - pb.y) * uy - sg * rp * pb.a);
+        } }, ratioOpts(j)));
+        r.data = { mode: 'rl', cA: A, cB: B, per: sg * rp, nom: sg * rp, u0: [Math.cos(B.a), Math.sin(B.a)], unit: 'm/s' }; add(key, r); break;
+      }
+      case 'screw': {
+        const sb = dynB(A), nb = dynB(B); if (!sb || !nb) { warn('丝杠螺母：丝杠需铰链装到固定点/电机上，螺母需可动'); break; }
+        const u = screwAxis(A), lead = A.lead / S, hd = A.hand >= 0 ? 1 : -1; guide(B, Math.atan2(u[1], u[0]));
+        const per = hd * lead / TAU;
+        const r = new Phys.Row(Object.assign({ A: sb, B: nb, kind: 'screw', upd(r) {
+          r.jvAx = -u[0]; r.jvAy = -u[1]; r.jwA = -per; r.jvBx = u[0]; r.jvBy = u[1];
+          r.pos((nb.x - sb.x) * u[0] + (nb.y - sb.y) * u[1] - per * sb.a);
+        } }, ratioOpts(j), { lock: !!j.lock }));
+        r.data = { mode: 'rl', cA: A, cB: B, per, nom: per, u0: u, unit: 'm/s' }; add(key, r); break;
+      }
+      case 'cam': {
+        const cb = dynB(A), fb = dynB(B); if (!cb) { warn('凸轮需铰链装到固定点/电机上才能转动'); break; }
+        if (!fb) break;
+        const rr = B.tip === 'roller' ? B.rr : 0; A.tipRR = rr;
+        const tbl = camTable(A, rr), Lh = B.L / 2 / S; guide(B, B.a + Math.PI / 2);
+        const r = new Phys.Row({ A: cb, B: fb, kind: 'cam', unilateral: true, beta: 0.2, upd(r) {
+          const p = fb.toWorld([0, Lh]), rx = p[0] - cb.x, ry = p[1] - cb.y, d = Math.hypot(rx, ry); if (d < 1e-6) return false;
+          const q = tbl.at(Math.atan2(ry, rx) - cb.a), rho = q[0], dr = q[1];
+          const nx = rx / d, ny = ry / d, tx = -ny, ty = nx, jx = nx - dr / d * tx, jy = ny - dr / d * ty;
+          r.C = d - rho; r.abs = true; r.data.gap = r.C; r.data.rho = rho;
+          r.jvBx = jx; r.jvBy = jy; r.jwB = (p[0] - fb.x) * jy - (p[1] - fb.y) * jx; r.jvAx = -jx; r.jvAy = -jy; r.jwA = dr;
+        } });
+        r.data = { mode: 'cam', cA: A, cB: B, tbl, o0: [cb.x, cb.y] };
+        add(key, r);
+        // 预压 pre 定义在从动件最低位置（轮廓最小半径处）：弹簧在整个行程内始终处于压缩状态
+        const rho0 = tbl.at(Math.atan2(fb.toWorld([0, Lh])[1] - cb.y, fb.toWorld([0, Lh])[0] - cb.x) - cb.a)[0]; let rmin = 1e9, rmax = -1e9; for (let i = 0; i < tbl.N; i++) { rmin = Math.min(rmin, tbl.rho[i]); rmax = Math.max(rmax, tbl.rho[i]); }
+        const stroke0 = Math.max(0, rho0 - rmin);
+        // 回位弹簧：固定点在从动件尾端的反向延长线上
+        const ux = -Math.sin(fb.a), uy = Math.cos(fb.a), back = fb.toWorld([0, -B.L / 2 / S]), lsp = Math.max(0.12, rmax - rho0 + 0.12);
+        const Q = [back[0] - ux * lsp, back[1] - uy * lsp]; sim.fsp[B.id] = Q;
+        const damp = 2 * 0.2 * Math.sqrt(Math.max(B.k, 1) * fb.m);
+        if (!sim.dragMode) w.addSpring({ A: W, la: Q, B: fb, lb: [0, -B.L / 2 / S], k: B.k, c: damp, L0: lsp + stroke0 + (B.pre || 0) / S, comp: B });
+        break;
+      }
+      case 'ratchet': { // 棘爪驱动：A(摆杆/任意转动件) 通过驱动棘爪推动棘轮 B 单向前进
+        const lb = dynB(A), wb = dynB(B); if (!lb || !wb) { warn('棘爪驱动：摆杆与棘轮都需要铰链'); break; }
+        const P = TAU / B.z, dir = B.dir >= 0 ? 1 : -1;
+        const r = new Phys.Row({ A: lb, B: wb, kind: 'drive', unilateral: true, beta: 0.15, upd(r) {
+          if (r.data.off === undefined) r.data.off = 0;
+          let C = dir * (wb.a - lb.a) - r.data.off; if (C >= P) { const k = Math.floor(C / P); r.data.off += k * P; C -= k * P; }
+          r.C = C; r.abs = true; r.jwA = -dir; r.jwB = dir;
+        } });
+        r.data = { mode: 'drive', cA: A, cB: B }; add(key, r); break;
+      }
+    }
+  };
+  for (const j of M.joints) if (isTrJoint(j)) buildJoint(j);
+  for (const j of sim.autoJ) buildJoint(j);
+  // 棘轮自带保持棘爪（逆向锁止，量化到齿距）
+  for (const c of M.comps) if (c.type === 'ratchet') {
+    const b = dynB(c); if (!b) continue;
+    const r = new Phys.Row({ A: W, B: b, kind: 'hold', unilateral: true, beta: 0.2, upd(r) {
+      if (!c.pawl) { r.data.lock = undefined; return false; }
+      const P = TAU / c.z, dir = c.dir >= 0 ? 1 : -1, th = dir * b.a, q = dir * c.pawlAng * D2R;
+      const n = Math.floor((th - q) / P + 1e-9), lk = q + n * P;
+      if (r.data.lock === undefined || lk > r.data.lock) r.data.lock = lk;
+      r.C = th - r.data.lock; r.abs = true; r.jwB = dir;
+    } });
+    r.data = { mode: 'hold', cB: c, cA: null }; add(c.id, r);
+  }
+  // 联轴器/离合器、减速器、万向节：两端件
+  for (const c of M.comps) if (isConn(c)) {
+    const e = springEnds[c.id] || [null, null]; const ba = e[0] && e[0].body, bb = e[1] && e[1].body;
+    const okb = b => b && b !== W && !b.static && b.comp;
+    if (!okb(ba) || !okb(bb)) { warn(c.name + '：两端都需要用铰链连到可转动的轴(齿轮/飞轮/皮带轮等)'); continue; }
+    const cA = ba.comp, cB = bb.comp;
+    if (c.type === 'clutch') {
+      const r = new Phys.Row({ A: ba, B: bb, kind: 'clutch', eff: c.eff == null ? 1 : c.eff, upd(r) { if (c.engaged === false) { r.slip = false; return false; } r.limitT = c.maxT > 0 ? c.maxT : 0; r.jwA = -1; r.jwB = 1; r.pos(bb.a - ba.a); } });
+      r.data = { mode: 'rr', cA, cB, nom: 1, clutch: c }; add(c.id, r);
+    } else if (c.type === 'gearbox') {
+      const rho = (c.rev ? -1 : 1) / Math.max(c.ratio, 1e-6);
+      const r = new Phys.Row({ A: ba, B: bb, kind: 'gearbox', eff: c.eff == null ? 1 : c.eff, upd(r) { r.jwA = -rho; r.jwB = 1; r.pos(bb.a - rho * ba.a); } });
+      r.data = { mode: 'rr', cA, cB, nom: rho }; add(c.id, r);
+    } else {
+      const r = new Phys.Row({ A: ba, B: bb, kind: 'ujoint', upd(r) { const G = ujointG(c.beta, ba.a); r.jwA = -G.gp; r.jwB = 1; r.pos(bb.a - G.g); r.data.g = G; } });
+      r.data = { mode: 'var', cA, cB, nom: 1, a0: ba.a, b0: bb.a }; add(c.id, r);
+    }
+  }
+  // 线性件隐式导轨：齿条沿自身轴向、螺母/从动件在对应 joint 里已加入；其余没有任何滑动副的齿条
+  for (const c of M.comps) if (c.type === 'rack' && !hasSlide(c) && !w.joints.some(x => x.id === 'guide:' + c.id)) { /* 未啮合的齿条保持自由 */ }
+  for (const b of w.bodies) if (b.comp && isTr(b.comp)) b.wmax = 3000;
+  if (w.rows.length) w.iters = Math.max(w.iters, 48);
 }
 /* ===================== 渲染 ===================== */
 const cv = document.getElementById('cv'), g = cv.getContext('2d');
@@ -929,7 +1606,8 @@ function drawComp(g, c, o) {
   o = o || {}; g.save();
   if (o.ghost) g.globalAlpha = 0.6;
   const lw = px(1.5);
-  if (isForce(c)) { drawSpringLike(g, c, o); g.restore(); return; }
+  if (isLine(c)) { if (isConn(c)) drawConn(g, c, o); else drawSpringLike(g, c, o); g.restore(); return; }
+  if (isTr(c)) { drawTr(g, c, o); g.restore(); return; }
   g.translate(c.x, c.y); g.rotate(c.a); g.lineJoin = 'round';
   switch (c.type) {
     case 'ground': {
@@ -1022,6 +1700,7 @@ function drawSpringLike(g, c, o) {
 }
 
 function drawJointMarker(g, j, o) {
+  if (isTrJoint(j)) { drawTrJoint(g, j, o); return; }
   const a = jointEndWorld(j, 'a'), b = jointEndWorld(j, 'b'); const gap = Math.hypot(a[0] - b[0], a[1] - b[1]);
   const col = COL[j.type];
   g.save();
@@ -1064,10 +1743,10 @@ function arrow(g, x, y, dx, dy, col, label, lyo) {
 }
 function selHandles(c) { // 返回屏幕外观的手柄 [{kind,pos}]（世界坐标）
   const hs = [];
-  if (c.type === 'rod' || isForce(c)) { const e = endPts(c); hs.push({ kind: 'end0', p: e[0] }); hs.push({ kind: 'end1', p: e[1] }); }
+  if (c.type === 'rod' || isLine(c)) { const e = endPts(c); hs.push({ kind: 'end0', p: e[0] }); hs.push({ kind: 'end1', p: e[1] }); }
   else {
-    const ext = c.type === 'wheel' || c.type === 'ball' ? c.r : c.type === 'motor' ? 24 : c.type === 'anchor' ? 14 : c.h / 2;
-    const l = [0, -(ext + 26 / view.k)]; const cs = Math.cos(c.a), sn = Math.sin(c.a);
+    const ext = isTr(c) ? rotHandleExt(c) : c.type === 'wheel' || c.type === 'ball' ? c.r : c.type === 'motor' ? 24 : c.type === 'anchor' ? 14 : c.h / 2;
+    const l = [0, -(ext + 26 / view.k)]; const ang0 = (c.type === 'worm' || c.type === 'screw') ? (c.axd || 0) * D2R : c.a; const cs = Math.cos(ang0), sn = Math.sin(ang0);
     hs.push({ kind: 'rot', p: [c.x + cs * l[0] - sn * l[1], c.y + sn * l[0] + cs * l[1]], base: [c.x + (cs * 0 - sn * -ext), c.y + (sn * 0 + cs * -ext)] });
   }
   return hs;
@@ -1078,6 +1757,7 @@ function draw() {
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   drawGrid(W, H);
   g.save(); g.translate(view.x, view.y); g.scale(view.k, view.k); K = view.k;
+  TRPH = trPhases();
   const sc = sel_.kind === 'comp' ? compById(sel_.id) : null;
   const order = M.comps.slice().sort((a, b) => TYPES[a.type].layer - TYPES[b.type].layer);
   for (const c of order) drawComp(g, c, { selected: sc === c, hover: ui.hoverComp === c.id && ui.tool === 'select' && sim.mode === 'edit' });
@@ -1089,8 +1769,10 @@ function draw() {
   }
   // 连接标记
   for (const j of M.joints) drawJointMarker(g, j, { selected: sel_.kind === 'joint' && sel_.id === j.id });
+  for (const j of (sim.mode === 'edit' ? (sim.autoMesh ? autoMeshList() : []) : sim.autoJ)) drawTrJoint(g, j, {});
   // 连接工具时显示全部可吸附锚点
-  const jt = ui.tool !== 'select';
+  const jt = ui.tool !== 'select' && !isTrTool(ui.tool);
+  if (isTrTool(ui.tool) && sim.mode === 'edit') drawTrToolOverlay(g);
   if (jt && sim.mode === 'edit') {
     for (const c of M.comps) for (const p of pts(c)) { const w = wpt(c, p.l); g.beginPath(); g.arc(w[0], w[1], px(3.5), 0, 7); g.fillStyle = 'rgba(37,99,235,.18)'; g.fill(); g.lineWidth = px(1); g.strokeStyle = 'rgba(37,99,235,.7)'; g.stroke(); }
     if (ui.hoverPt) { const h = ui.hoverPt; g.beginPath(); g.arc(h.w[0], h.w[1], px(10), 0, 7); g.lineWidth = px(2.5); g.strokeStyle = COL[ui.tool]; g.stroke(); g.fillStyle = 'rgba(255,255,255,.5)'; g.fill();
@@ -1131,6 +1813,7 @@ function drawIcon(cnv, type, over) {
     case 'ball': c.r = 18; ext = 22; break; case 'ground': c.w = 70; c.h = 14; ext = 40; break; case 'wall': break;
     case 'spring': case 'damper': c.L = 72; ext = 40; break; case 'anchor': ext = 24; break; case 'motor': ext = 26; break;
   }
+  if (trIconExt[type]) { ext = trIconExt[type]; if (isConn(c)) c.L = type === 'gearbox' ? 100 : 88; if (type === 'worm') c.Lw = 70; }
   if (over && over.wall) { c.w = 14; c.h = 52; ext = 30; }
   const k = Math.min(cnv.width, cnv.height) / 2 / ext * 0.95;
   x.save(); x.translate(cnv.width / 2, cnv.height / 2 + (type === 'anchor' ? -6 : 0)); x.scale(k, k);
@@ -1139,9 +1822,329 @@ function drawIcon(cnv, type, over) {
   drawCompTo(gg, c); K = sk; x.restore();
 }
 function drawCompTo(ctx, c) { drawComp(ctx, c, {}); }
+/* ===================== 传动零件：绘制 ===================== */
+let TRPH = { off: {}, shift: {} };
+const TRC = { // [亮, 暗, 描边]
+  gear: ['#dbeafe', '#60a5fa', '#1e3a8a'], bevel: ['#fef3c7', '#f59e0b', '#78350f'], wormwheel: ['#fde68a', '#d97706', '#78350f'], ring: ['#e2e8f0', '#94a3b8', '#334155'],
+  pulley: ['#fed7aa', '#fb923c', '#7c2d12'], sprocket: ['#fef9c3', '#eab308', '#713f12'], cam: ['#e9d5ff', '#a855f7', '#3b0764'], ratchet: ['#bbf7d0', '#22c55e', '#14532d'],
+  geneva: ['#99f6e4', '#14b8a6', '#134e4a'], gpin: ['#fecaca', '#ef4444', '#7f1d1d'], flywheel: ['#cbd5e1', '#64748b', '#0f172a'], worm: ['#fde68a', '#b45309', '#451a03'], screw: ['#e5e7eb', '#6b7280', '#111827'],
+  rack: ['#e0f2fe', '#38bdf8', '#0c4a6e'], nut: ['#fce7f3', '#ec4899', '#831843'], follower: ['#fae8ff', '#c026d3', '#4a044e']
+};
+function glowG(g, o) { if (!o) return; if (o.selected) { g.save(); g.lineWidth = px(7); g.strokeStyle = 'rgba(37,99,235,.35)'; g.stroke(); g.restore(); } else if (o.hover) { g.save(); g.lineWidth = px(5); g.strokeStyle = 'rgba(37,99,235,.2)'; g.stroke(); g.restore(); } }
+function fillRad(g, r, cols) { const gr = g.createRadialGradient(-r * .3, -r * .3, r * .1, 0, 0, r * 1.05); gr.addColorStop(0, cols[0]); gr.addColorStop(1, cols[1]); return gr; }
+function gearPoly(g, rp, z, add, ded, shape) { // 在当前路径加入带齿外轮廓
+  const P = TAU / z, ro = rp + add, rf = Math.max(rp - ded, rp * 0.3);
+  const f = shape === 'sprocket' ? [[rf, -0.36], [rp, -0.24], [ro, -0.08], [ro, 0.08], [rp, 0.24], [rf, 0.36]] : [[rf, -0.30], [rp, -0.235], [ro, -0.14], [ro, 0.14], [rp, 0.235], [rf, 0.30]];
+  let first = true;
+  for (let i = 0; i < z; i++) {
+    const t = i * P;
+    for (const q of f) { const a = t + q[1] * P, x = Math.cos(a) * q[0], y = Math.sin(a) * q[0]; if (first) { g.moveTo(x, y); first = false; } else g.lineTo(x, y); }
+    const am = t + 0.5 * P; g.lineTo(Math.cos(am) * rf, Math.sin(am) * rf);
+  }
+  g.closePath();
+}
+function rotMark(g, r, col) { g.beginPath(); g.moveTo(0, 0); g.lineTo(r, 0); g.lineWidth = px(2.2); g.strokeStyle = col; g.stroke(); g.beginPath(); g.arc(r, 0, Math.max(px(2.5), r * 0.07), 0, 7); g.fillStyle = col; g.fill(); }
+function holes(g, rIn, rOut, n, col) { // 减重孔
+  if (rOut - rIn < 3) return; const rm = (rIn + rOut) / 2, hr = Math.min((rOut - rIn) * 0.38, rm * Math.sin(Math.PI / n) * 0.7);
+  g.fillStyle = col; for (let i = 0; i < n; i++) { const a = (i + 0.5) * TAU / n; g.beginPath(); g.arc(Math.cos(a) * rm, Math.sin(a) * rm, hr, 0, 7); g.fill(); }
+}
+function trRunInfo(c) { // 运行中的标签文字
+  if (sim.mode === 'edit' || !sim.world) return null; const b = sim.bodyOf[c.id]; if (!b || b.static) return null;
+  if (TR_LIN.indexOf(c.type) >= 0) { const u = c.type === 'follower' ? [-Math.sin(b.a), Math.cos(b.a)] : c.type === 'nut' ? screwAxisOfNut(c) : [Math.cos(b.a), Math.sin(b.a)]; return (b.vx * u[0] + b.vy * u[1]).toFixed(3) + ' m/s'; }
+  return (b.w * 30 / Math.PI).toFixed(1) + ' rpm';
+}
+function screwAxisOfNut(c) { const j = M.joints.find(x => x.type === 'mesh' && x.kind === 'screw' && x.b === c.id); const s = j && compById(j.a); return s ? screwAxis(s) : [1, 0]; }
+function trTag(g, x, y, txt) {
+  g.save(); g.font = 'bold ' + px(11) + 'px sans-serif'; const w = g.measureText(txt).width + px(8), h = px(15);
+  g.fillStyle = 'rgba(17,24,39,.82)'; g.beginPath(); g.rect(x - w / 2, y - h, w, h); g.fill(); g.fillStyle = '#fef08a'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(txt, x, y - h / 2); g.restore();
+}
+function rackSideFor(c) {
+  const js = allMeshJoints().filter(j => j.type === 'mesh' && j.kind === 'rack' && j.b === c.id); const A = js.length && compById(js[0].a);
+  return A ? rackSide(c, [A.x, A.y]) : -1;
+}
+function drawTr(g, c, o) {
+  o = o || {}; const lw = px(1.5), cols = TRC[c.type] || TRC.gear, st = cols[2];
+  g.save(); g.translate(c.x, c.y); g.lineJoin = 'round';
+  const ph = TRPH.off[c.id] || 0;
+  const ext = extR(c);
+  switch (c.type) {
+    case 'gear': case 'bevel': case 'wormwheel': {
+      const rp = trR(c), add = addendum(c), ded = dedendum(c), rf = rp - ded;
+      g.save(); g.rotate(c.a + ph);
+      g.beginPath(); gearPoly(g, rp, c.z, add, ded); glowG(g, o);
+      g.fillStyle = fillRad(g, rp + add, cols); g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      if (c.type === 'bevel') { // 锥面
+        for (const k of [0.84, 0.66, 0.48]) { g.beginPath(); g.arc(0, 0, rf * k, 0, 7); g.lineWidth = px(1); g.strokeStyle = 'rgba(120,53,15,.45)'; g.stroke(); }
+        g.beginPath(); for (let i = 0; i < 12; i++) { const a = i * TAU / 12; g.moveTo(Math.cos(a) * rf * 0.3, Math.sin(a) * rf * 0.3); g.lineTo(Math.cos(a) * rf * .95, Math.sin(a) * rf * .95); } g.strokeStyle = 'rgba(120,53,15,.28)'; g.stroke();
+      } else if (c.type === 'wormwheel') {
+        g.beginPath(); g.arc(0, 0, rf * 0.9, 0, 7); g.lineWidth = px(1); g.strokeStyle = 'rgba(120,53,15,.5)'; g.stroke();
+        g.beginPath(); for (let i = 0; i < c.z; i++) { const a = i * TAU / c.z; g.moveTo(Math.cos(a - 0.12) * rf * 0.9, Math.sin(a - 0.12) * rf * 0.9); g.lineTo(Math.cos(a + 0.12) * (rp + add * 0.9), Math.sin(a + 0.12) * (rp + add * 0.9)); } g.strokeStyle = 'rgba(120,53,15,.35)'; g.stroke();
+        holes(g, rf * 0.28, rf * 0.8, 5, 'rgba(255,251,235,.9)');
+      } else { holes(g, rf * 0.3, rf * 0.88, c.z >= 12 ? 5 : 0, 'rgba(248,250,252,.92)'); }
+      g.beginPath(); g.arc(0, 0, Math.max(rf * 0.22, 2), 0, 7); g.fillStyle = '#475569'; g.fill(); g.lineWidth = px(1); g.strokeStyle = st; g.stroke();
+      rotMark(g, rf * 0.8, st);
+      g.restore();
+      if (o.selected || sim.mode === 'edit') { g.beginPath(); g.arc(0, 0, rp, 0, 7); g.setLineDash([px(3), px(3)]); g.lineWidth = px(1); g.strokeStyle = 'rgba(30,58,138,.45)'; g.stroke(); g.setLineDash([]); }
+      break;
+    }
+    case 'ring': {
+      const rp = trR(c), add = addendum(c), ded = dedendum(c), Ro = rp + ded + c.rim;
+      g.save(); g.rotate(c.a + ph);
+      g.beginPath(); g.arc(0, 0, Ro, 0, TAU); glowG(g, o);
+      g.save(); g.rotate(Math.PI / c.z); gearPoly(g, rp, c.z, ded, add); g.restore();
+      g.fillStyle = fillRad(g, Ro, cols); g.fill('evenodd'); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      g.beginPath(); g.arc(0, 0, Ro - c.rim * 0.35, 0, 7); g.lineWidth = px(1); g.strokeStyle = 'rgba(51,65,85,.4)'; g.stroke();
+      for (let i = 0; i < 6; i++) { const a = i * TAU / 6 + 0.3; g.beginPath(); g.arc(Math.cos(a) * (Ro - c.rim * 0.5), Math.sin(a) * (Ro - c.rim * 0.5), Math.max(1.2, c.rim * 0.16), 0, 7); g.fillStyle = '#475569'; g.fill(); }
+      rotMark(g, Ro - c.rim * 0.5, st);
+      g.restore(); break;
+    }
+    case 'rack': {
+      const p = Math.PI * c.m / 10, Ln = rackLen(c), s = rackSideFor(c), add = addendum(c), ded = dedendum(c), hy = c.h / 2, yp = s * hy;
+      const sh = TRPH.shift[c.id] || 0, rootY = yp - s * ded;
+      g.save(); g.rotate(c.a);
+      g.beginPath(); g.moveTo(-Ln / 2, -s * hy);
+      // 齿线（沿 x 方向）
+      const x0 = -Ln / 2; let pts2 = [];
+      const k0 = Math.floor((x0 - sh) / p) - 1, k1 = Math.ceil((Ln / 2 - sh) / p) + 1;
+      const prof = [[-0.30, rootY], [-0.235, yp], [-0.14, yp + s * add], [0.14, yp + s * add], [0.235, yp], [0.30, rootY]];
+      for (let k = k0; k <= k1; k++) for (const q of prof) pts2.push([sh + (k + q[0]) * p, q[1]]);
+      pts2 = pts2.filter(q => q[0] >= x0 - p * 0.31 && q[0] <= Ln / 2 + p * 0.31).map(q => [Math.max(x0, Math.min(Ln / 2, q[0])), q[1]]);
+      g.moveTo(x0, -s * hy); g.lineTo(x0, rootY); for (const q of pts2) g.lineTo(q[0], q[1]); g.lineTo(Ln / 2, rootY); g.lineTo(Ln / 2, -s * hy); g.closePath(); glowG(g, o);
+      const gr = g.createLinearGradient(0, -hy, 0, hy); gr.addColorStop(0, cols[0]); gr.addColorStop(1, cols[1]); g.fillStyle = gr; g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      g.beginPath(); g.moveTo(-Ln / 2, yp); g.lineTo(Ln / 2, yp); g.setLineDash([px(3), px(3)]); g.lineWidth = px(1); g.strokeStyle = 'rgba(12,74,110,.5)'; g.stroke(); g.setLineDash([]);
+      g.beginPath(); g.arc(0, 0, Math.min(3, hy * 0.4), 0, 7); g.fillStyle = '#475569'; g.fill();
+      g.restore(); break;
+    }
+    case 'worm': case 'screw': {
+      const isW = c.type === 'worm', Ln = isW ? c.Lw : c.Ls, r = c.r, ax = (c.axd || 0) * D2R;
+      g.save(); g.rotate(ax);
+      g.beginPath(); g.rect(-Ln / 2, -r, Ln, 2 * r); glowG(g, o);
+      const gr = g.createLinearGradient(0, -r, 0, r); gr.addColorStop(0, cols[0]); gr.addColorStop(0.5, cols[1]); gr.addColorStop(1, cols[0]); g.fillStyle = gr; g.fill();
+      g.save(); g.clip(); const pitch = Math.max(isW ? r * 0.9 : c.lead, px(4) * 0.8), sgn = isW ? 1 : (c.hand >= 0 ? 1 : -1);
+      const shift = modP(sgn * (c.a / TAU) * pitch * (isW ? (c.starts || 1) : 1), pitch);
+      g.beginPath(); for (let x = -Ln / 2 - pitch * 2 + shift; x < Ln / 2 + pitch; x += pitch) { g.moveTo(x - r * 0.5, r); g.lineTo(x + r * 0.5, -r); }
+      g.lineWidth = px(1.8); g.strokeStyle = st; g.stroke(); g.restore();
+      g.beginPath(); g.rect(-Ln / 2, -r, Ln, 2 * r); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      g.beginPath(); g.arc(0, 0, Math.min(3, r * 0.5), 0, 7); g.fillStyle = '#334155'; g.fill();
+      // 转向箭头
+      g.beginPath(); g.arc(0, 0, r + px(6), -2.2, 0.6); g.lineWidth = px(1.2); g.strokeStyle = 'rgba(55,65,81,.7)'; g.stroke();
+      g.restore(); break;
+    }
+    case 'pulley': {
+      const r = c.r; g.save(); g.rotate(c.a);
+      g.beginPath(); g.arc(0, 0, r, 0, 7); glowG(g, o); g.fillStyle = fillRad(g, r, cols); g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      for (const k of [0.9, 0.76]) { g.beginPath(); g.arc(0, 0, r * k, 0, 7); g.lineWidth = px(1); g.strokeStyle = 'rgba(124,45,18,.55)'; g.stroke(); }
+      holes(g, r * 0.25, r * 0.7, 5, 'rgba(255,247,237,.95)'); g.beginPath(); g.arc(0, 0, Math.max(r * 0.16, 2), 0, 7); g.fillStyle = '#7c2d12'; g.fill();
+      rotMark(g, r * 0.72, st); g.restore(); break;
+    }
+    case 'sprocket': {
+      const rp = trR(c), p = c.p / 10; g.save(); g.rotate(c.a);
+      g.beginPath(); gearPoly(g, rp, c.z, 0.3 * p, 0.35 * p, 'sprocket'); glowG(g, o); g.fillStyle = fillRad(g, rp, cols); g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      holes(g, rp * 0.25, rp * 0.82, 6, 'rgba(254,252,232,.95)'); g.beginPath(); g.arc(0, 0, Math.max(rp * 0.16, 2), 0, 7); g.fillStyle = '#713f12'; g.fill();
+      rotMark(g, rp * 0.78, st); g.restore();
+      g.beginPath(); g.arc(0, 0, rp, 0, 7); g.setLineDash([px(3), px(3)]); g.lineWidth = px(1); g.strokeStyle = 'rgba(113,63,18,.4)'; g.stroke(); g.setLineDash([]);
+      break;
+    }
+    case 'flywheel': {
+      const r = c.r, ri = c.ri; g.save(); g.rotate(c.a);
+      g.beginPath(); g.arc(0, 0, r, 0, TAU); g.arc(0, 0, ri, 0, TAU, true); glowG(g, o); g.fillStyle = fillRad(g, r, ['#94a3b8', '#334155']); g.fill('evenodd'); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      g.beginPath(); for (let i = 0; i < 6; i++) { const a = i * TAU / 6; g.moveTo(Math.cos(a) * r * 0.16, Math.sin(a) * r * 0.16); g.lineTo(Math.cos(a) * ri, Math.sin(a) * ri); } g.lineWidth = Math.max(px(3), r * 0.07); g.strokeStyle = '#64748b'; g.stroke();
+      g.beginPath(); g.arc(0, 0, Math.max(r * 0.16, 3), 0, 7); g.fillStyle = '#1e293b'; g.fill();
+      g.beginPath(); g.arc(0, 0, (r + ri) / 2, -0.35, 0.35); g.lineWidth = (r - ri) * 0.6; g.strokeStyle = '#fbbf24'; g.stroke(); // 配重标记
+      g.restore(); break;
+    }
+    case 'cam': {
+      g.save(); g.rotate(c.a);
+      const rr = c.tipRR || 0; g.beginPath();
+      if (c.kind === 'ecc') { g.arc(c.e, 0, c.R, 0, TAU); }
+      else { // 轮廓：节曲线向内偏置 rr
+        const N = 360, P = []; for (let i = 0; i < N; i++) { const a = i * TAU / N, rho = camRhoRaw(c, a, rr); P.push([rho * Math.cos(a), rho * Math.sin(a)]); }
+        for (let i = 0; i < N; i++) { let q = P[i]; if (rr > 0) { const p0 = P[(i + N - 1) % N], p1 = P[(i + 1) % N], tx = p1[0] - p0[0], ty = p1[1] - p0[1], tl = Math.hypot(tx, ty) || 1; q = [q[0] + ty / tl * rr, q[1] - tx / tl * rr]; } i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); }
+        g.closePath();
+      }
+      glowG(g, o); g.fillStyle = fillRad(g, c.kind === 'ecc' ? c.R : c.Rb + c.h, cols); g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      if (c.kind !== 'ecc') { g.beginPath(); g.arc(0, 0, c.Rb, 0, 7); g.setLineDash([px(3), px(3)]); g.lineWidth = px(1); g.strokeStyle = 'rgba(59,7,100,.4)'; g.stroke(); g.setLineDash([]); }
+      g.beginPath(); g.arc(0, 0, Math.max(3, Math.min(c.kind === 'ecc' ? c.R : c.Rb, 40) * 0.15), 0, 7); g.fillStyle = '#fff'; g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      g.beginPath(); g.moveTo(-5, 0); g.lineTo(5, 0); g.moveTo(0, -5); g.lineTo(0, 5); g.lineWidth = px(1); g.stroke();
+      if (c.kind === 'ecc') { g.beginPath(); g.arc(c.e, 0, 2.5, 0, 7); g.fillStyle = st; g.fill(); }
+      g.restore(); break;
+    }
+    case 'follower': {
+      g.save(); g.rotate(c.a); const L = c.L, w = c.w, roller = c.tip === 'roller';
+      // 导向套
+      g.beginPath(); g.rect(-w * 0.9, -L / 2, w * 1.8, L * 0.35); g.fillStyle = 'rgba(100,116,139,.18)'; g.fill(); g.lineWidth = px(1); g.strokeStyle = 'rgba(71,85,105,.6)'; g.stroke();
+      g.beginPath(); g.rect(-w / 2, -L / 2, w, L - (roller ? 0 : 7)); glowG(g, o);
+      const gr = g.createLinearGradient(-w / 2, 0, w / 2, 0); gr.addColorStop(0, cols[0]); gr.addColorStop(1, cols[1]); g.fillStyle = gr; g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      if (roller) { g.beginPath(); g.arc(0, L / 2, c.rr, 0, 7); g.fillStyle = '#f5d0fe'; g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke(); g.beginPath(); g.arc(0, L / 2, 2, 0, 7); g.fillStyle = st; g.fill(); }
+      else { g.beginPath(); g.moveTo(-w * 0.32, L / 2 - 7); g.lineTo(0, L / 2); g.lineTo(w * 0.32, L / 2 - 7); g.closePath(); g.fillStyle = '#4a044e'; g.fill(); }
+      g.beginPath(); g.moveTo(0, -L / 2 + 3); g.lineTo(0, L / 2 - 12); g.setLineDash([px(3), px(3)]); g.lineWidth = px(1); g.strokeStyle = 'rgba(74,4,78,.5)'; g.stroke(); g.setLineDash([]);
+      g.restore();
+      break;
+    }
+    case 'nut': {
+      g.save(); g.rotate(c.a); g.beginPath(); rr(g, -c.w / 2, -c.h / 2, c.w, c.h, 3); glowG(g, o);
+      const gr = g.createLinearGradient(0, -c.h / 2, 0, c.h / 2); gr.addColorStop(0, cols[0]); gr.addColorStop(1, cols[1]); g.fillStyle = gr; g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      g.beginPath(); g.moveTo(-c.w / 2 + 3, -c.h * 0.18); g.lineTo(c.w / 2 - 3, -c.h * 0.18); g.moveTo(-c.w / 2 + 3, c.h * 0.18); g.lineTo(c.w / 2 - 3, c.h * 0.18); g.lineWidth = px(1.2); g.strokeStyle = st; g.stroke();
+      g.beginPath(); g.moveTo(-6, 0); g.lineTo(6, 0); g.moveTo(0, -6); g.lineTo(0, 6); g.lineWidth = px(1); g.stroke();
+      g.restore(); break;
+    }
+    case 'ratchet': {
+      const r = c.r, z = c.z, dep = Math.max(r * 0.2, 2), P = TAU / z, rf = r - dep, dir = c.dir >= 0 ? 1 : -1;
+      g.save(); g.rotate(c.a); g.scale(1, dir); // 镜像表示逆向
+      g.beginPath();
+      for (let i = 0; i < z; i++) { const t = i * P; // 锯齿：t 处垂直面(外→内)，随角度增大半径由顶降到根
+        g.lineTo(Math.cos(t) * r, Math.sin(t) * r); g.lineTo(Math.cos(t + P * 0.98) * rf, Math.sin(t + P * 0.98) * rf); g.lineTo(Math.cos(t + P) * rf, Math.sin(t + P) * rf); if (i === 0) { /* path start */ } }
+      g.closePath(); glowG(g, o); g.fillStyle = fillRad(g, r, cols); g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      holes(g, rf * 0.3, rf * 0.88, 5, 'rgba(240,253,244,.95)'); g.beginPath(); g.arc(0, 0, Math.max(rf * 0.2, 2), 0, 7); g.fillStyle = '#14532d'; g.fill();
+      rotMark(g, rf * 0.8, st); g.restore();
+      // 棘爪(世界系，不随轮转)：尖端沿齿廓起伏
+      const b = sim.bodyOf[c.id], th = dir * c.a, pa = dir * c.pawlAng * D2R;
+      let al = (pa - th) / P; const fr = al - Math.ceil(al - 1e-9) + 1; // (0,1]
+      const rt = rf + dep * (1 - fr) * (1 - 0.0), wa = c.pawlAng * D2R;
+      const tip = [Math.cos(wa) * rt, Math.sin(wa) * rt], piv = [Math.cos(wa + dir * 0.55) * (r * 1.6), Math.sin(wa + dir * 0.55) * (r * 1.6)];
+      if (c.pawl) {
+        g.beginPath(); g.moveTo(piv[0], piv[1]); g.lineTo(tip[0], tip[1]); g.lineWidth = Math.max(px(4), 2.5); g.lineCap = 'round'; g.strokeStyle = '#374151'; g.stroke();
+        g.beginPath(); g.arc(piv[0], piv[1], 3.2, 0, 7); g.fillStyle = '#fff'; g.fill(); g.lineWidth = px(1.2); g.strokeStyle = '#374151'; g.stroke(); g.lineCap = 'butt';
+        g.beginPath(); g.arc(tip[0], tip[1], 2, 0, 7); g.fillStyle = '#dc2626'; g.fill();
+      }
+      break;
+    }
+    case 'gpin': {
+      const r = c.r, rp = c.rp, n = c.n || 4, half = Math.PI / 2 - Math.PI / n + 0.22;
+      g.save(); g.rotate(c.a);
+      g.beginPath(); g.arc(0, 0, r, half, TAU - half); g.arc(0, 0, Math.max(rp - 4, r * 0.4), TAU - half, half, true); g.closePath(); glowG(g, o);
+      g.fillStyle = fillRad(g, r, cols); g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      g.beginPath(); g.moveTo(0, 0); g.lineTo(rp, 0); g.lineWidth = Math.max(px(5), 3); g.strokeStyle = '#7f1d1d'; g.stroke();
+      g.beginPath(); g.arc(rp, 0, 3.4, 0, 7); g.fillStyle = '#fef2f2'; g.fill(); g.lineWidth = px(1.5); g.strokeStyle = st; g.stroke();
+      g.beginPath(); g.arc(0, 0, Math.max(3, r * 0.1), 0, 7); g.fillStyle = '#334155'; g.fill();
+      g.restore(); break;
+    }
+    case 'geneva': {
+      const n = c.n, R = c.R, J = M.joints.find(x => x.type === 'mesh' && x.kind === 'geneva' && x.b === c.id), D = J && compById(J.a);
+      const a = D ? Math.hypot(D.x - c.x, D.y - c.y) : R * 1.25, Rl = D ? D.r : R * 0.55, rpin = D ? D.rp : a * Math.sin(Math.PI / n);
+      g.save(); g.rotate(c.a); g.beginPath();
+      const steps = 360;
+      for (let i = 0; i <= steps; i++) {
+        const al = i * TAU / steps; let rad = R;
+        const k = Math.round(al / (TAU / n) - 0.5); // 最近的两槽之间
+        for (const kk of [k - 1, k, k + 1]) { const am = (kk + 0.5) * TAU / n, dl = al - am, sn = a * Math.sin(dl); if (Math.abs(sn) < Rl && Math.cos(dl) > 0) { const dd = a * Math.cos(dl) - Math.sqrt(Rl * Rl - sn * sn); if (dd > 0 && dd < rad) rad = dd; } }
+        const x = Math.cos(al) * rad, y = Math.sin(al) * rad; i ? g.lineTo(x, y) : g.moveTo(x, y);
+      }
+      g.closePath(); glowG(g, o); g.fillStyle = fillRad(g, R, cols); g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      for (let k = 0; k < n; k++) { const al = k * TAU / n, wd = 3.4, r0 = Math.max(a - rpin - 3, R * 0.12); g.save(); g.rotate(al); g.beginPath(); g.moveTo(R + 1, -wd); g.lineTo(r0, -wd); g.arc(r0, 0, wd, -Math.PI / 2, Math.PI / 2, true); g.lineTo(R + 1, wd); g.closePath(); g.fillStyle = '#134e4a'; g.fill(); g.restore(); }
+      g.beginPath(); g.arc(0, 0, Math.max(3, R * 0.07), 0, 7); g.fillStyle = '#f0fdfa'; g.fill(); g.lineWidth = lw; g.strokeStyle = st; g.stroke();
+      g.restore(); break;
+    }
+  }
+  g.restore();
+  // 世界系附加：从动件回位弹簧、运行标签
+  if (c.type === 'follower') drawFollowerSpring(g, c);
+  const info = trRunInfo(c); if (info) trTag(g, c.x, c.y - (c.type === 'rack' ? c.h : ext) - px(4), info);
+  if (o.selected || (sim.mode === 'edit' && o.hover)) { g.save(); g.font = px(11) + 'px sans-serif'; g.fillStyle = '#334155'; g.textAlign = 'center'; const lab = trLabel(c); if (lab) g.fillText(lab, c.x, c.y + ext + px(14)); g.restore(); }
+}
+function trLabel(c) {
+  switch (c.type) {
+    case 'gear': case 'bevel': case 'wormwheel': case 'ring': return `m${c.m} z${c.z}`; case 'sprocket': return `z${c.z} p${c.p}`; case 'pulley': return `R${r1(c.r)}`;
+    case 'rack': return `m${c.m} z${c.z}`; case 'cam': return c.kind === 'ecc' ? '偏心圆凸轮' : c.kind === 'harmonic' ? '简谐凸轮' : '等速凸轮'; case 'ratchet': return `z${c.z}`; case 'geneva': return `${c.n}槽`; case 'screw': return `导程 ${c.lead} cm`; case 'worm': return `${c.starts}头`;
+  }
+  return '';
+}
+function drawFollowerSpring(g, c) {
+  const Q = sim.mode !== 'edit' && sim.fsp[c.id] ? [sim.fsp[c.id][0] * S, sim.fsp[c.id][1] * S] : null;
+  const ux = -Math.sin(c.a), uy = Math.cos(c.a), back = wpt(c, [0, -c.L / 2]);
+  const q = Q || [back[0] - ux * 12, back[1] - uy * 12];
+  const dx = back[0] - q[0], dy = back[1] - q[1], L = Math.hypot(dx, dy) || 1, vx = dx / L, vy = dy / L, nx = -vy, ny = vx;
+  g.save(); g.lineJoin = 'round'; g.beginPath(); g.moveTo(q[0], q[1]); const n = 8, lead = Math.min(3, L * 0.15);
+  g.lineTo(q[0] + vx * lead, q[1] + vy * lead);
+  for (let i = 0; i < n; i++) { const t = lead + (L - 2 * lead) * (i + 0.5) / n, s = i % 2 ? -4 : 4; g.lineTo(q[0] + vx * t + nx * s, q[1] + vy * t + ny * s); }
+  g.lineTo(back[0] - vx * lead, back[1] - vy * lead); g.lineTo(back[0], back[1]); g.lineWidth = px(1.8); g.strokeStyle = '#0f766e'; g.stroke();
+  // 固定座
+  g.beginPath(); g.moveTo(q[0] + nx * 9, q[1] + ny * 9); g.lineTo(q[0] - nx * 9, q[1] - ny * 9); g.lineWidth = px(3); g.strokeStyle = '#374151'; g.stroke();
+  g.restore();
+}
+/* ---- 联轴器 / 减速器 / 万向节 (两端件) ---- */
+function drawConn(g, c, o) {
+  const p1 = wpt(c, [-1, 0]), p2 = wpt(c, [1, 0]); o = o || {}; const L = c.L, h = c.h || 30;
+  g.save(); g.translate(c.x, c.y); g.rotate(c.a); g.lineJoin = 'round';
+  const rw = sim.mode !== 'edit' && sim.rowsOf[c.id] && sim.rowsOf[c.id][0];
+  if (c.type === 'clutch') {
+    const eng = c.engaged !== false, slip = rw && rw.slip, gap = eng ? 1 : 9, fw = Math.max(10, L * 0.2);
+    g.beginPath(); g.rect(-L / 2, -2.5, L, 5); g.fillStyle = '#9ca3af'; g.fill(); // 轴
+    for (const sd of [-1, 1]) {
+      const x0 = sd < 0 ? -gap - fw : gap; g.beginPath(); g.rect(x0, -h / 2, fw, h); if (sd < 0) glowG(g, o);
+      g.fillStyle = sd < 0 ? '#bfdbfe' : '#fecaca'; g.fill(); g.lineWidth = px(1.5); g.strokeStyle = '#1f2937'; g.stroke();
+      g.beginPath(); for (let i = -3; i <= 3; i++) { g.moveTo(x0 + (sd < 0 ? fw : 0), i * h / 8); g.lineTo(x0 + (sd < 0 ? fw - 5 : 5), i * h / 8); } g.lineWidth = px(1); g.stroke();
+    }
+    g.beginPath(); g.rect(-gap + 0.5, -h * 0.4, 2 * gap - 1, h * 0.8); g.fillStyle = eng ? (slip ? '#ef4444' : '#16a34a') : 'rgba(0,0,0,0)'; g.fill();
+    g.fillStyle = '#111827'; g.font = px(11) + 'px sans-serif'; g.textAlign = 'center'; g.save(); g.rotate(-c.a); g.fillText((eng ? (slip ? '打滑 ' : '接合 ') : '分离 ') + '≤' + c.maxT + 'N·m', 0, h / 2 + px(14)); g.restore();
+  } else if (c.type === 'gearbox') {
+    rr(g, -L / 2 + 8, -h / 2, L - 16, h, 6); glowG(g, o); const gr = g.createLinearGradient(0, -h / 2, 0, h / 2); gr.addColorStop(0, '#fde68a'); gr.addColorStop(1, '#f59e0b'); g.fillStyle = gr; g.fill(); g.lineWidth = px(1.8); g.strokeStyle = '#78350f'; g.stroke();
+    g.beginPath(); g.rect(-L / 2, -3, 10, 6); g.rect(L / 2 - 10, -3, 10, 6); g.fillStyle = '#6b7280'; g.fill();
+    g.save(); g.rotate(-c.a); g.fillStyle = '#451a03'; g.font = 'bold ' + px(14) + 'px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('i = ' + c.ratio + ':1', 0, -2);
+    g.font = px(10) + 'px sans-serif'; g.fillText('输入 →' + (c.rev ? ' 反向' : ' 同向') + ' 输出', 0, 12); g.restore();
+    g.beginPath(); g.arc(-L / 2 + 14, -h / 2 + 7, 3, 0, 7); g.fillStyle = '#16a34a'; g.fill();
+  } else {
+    g.beginPath(); g.rect(-L / 2, -2.5, L, 5); g.fillStyle = '#9ca3af'; g.fill();
+    for (const sd of [-1, 1]) { g.beginPath(); g.moveTo(sd * (L * 0.12), -h / 2); g.lineTo(sd * (L * 0.12 + 14), -h / 2); g.lineTo(sd * (L * 0.12 + 14), h / 2); g.lineTo(sd * (L * 0.12), h / 2); g.lineWidth = px(2.5); g.strokeStyle = '#374151'; g.stroke(); }
+    g.beginPath(); g.moveTo(-L * 0.12 + 2, 0); g.lineTo(L * 0.12 - 2, 0); g.moveTo(0, -h * 0.42); g.lineTo(0, h * 0.42); glowG(g, o); g.lineWidth = px(5); g.strokeStyle = '#6366f1'; g.stroke();
+    g.save(); g.rotate(-c.a); g.fillStyle = '#312e81'; g.font = px(11) + 'px sans-serif'; g.textAlign = 'center'; g.fillText('万向节 β=' + c.beta + '°', 0, h / 2 + px(14)); g.restore();
+  }
+  g.restore();
+  for (const p of [p1, p2]) { g.beginPath(); g.arc(p[0], p[1], 4, 0, 7); g.fillStyle = '#fff'; g.fill(); g.lineWidth = px(1.2); g.strokeStyle = '#334155'; g.stroke(); }
+  if (sim.mode !== 'edit' && rw) { const t = trRowText(rw, true); if (t) trTag(g, c.x, c.y - h / 2 - px(6), t); }
+}
+/* ---- 传动连接：啮合标记 / 皮带 / 链条 ---- */
+function drawTrJoint(g, j, o) {
+  o = o || {}; g.save(); g.lineJoin = 'round';
+  const run = sim.mode !== 'edit' && sim.world;
+  if (j.type === 'mesh') {
+    const A = compById(j.a), B = compById(j.b); if (!A || !B) { g.restore(); return; }
+    const gap = meshGap(j), bad = gap > Math.max(1, 0.05 * (trR(A) + trR(B)));
+    const p = trJointPoint(j);
+    g.beginPath(); g.moveTo(A.x, A.y); g.lineTo(B.x, B.y); g.setLineDash([px(4), px(4)]); g.lineWidth = px(1.2); g.strokeStyle = bad ? '#ef4444' : (j.auto ? 'rgba(22,163,74,.55)' : 'rgba(22,163,74,.9)'); g.stroke(); g.setLineDash([]);
+    const r = px(8);
+    if (o.selected) { g.beginPath(); g.arc(p[0], p[1], r + px(4), 0, 7); g.lineWidth = px(2.5); g.strokeStyle = 'rgba(37,99,235,.55)'; g.stroke(); }
+    g.beginPath(); g.arc(p[0], p[1], r, 0, 7); g.fillStyle = j.auto ? '#ecfdf5' : '#fff'; g.fill(); g.lineWidth = px(2); g.strokeStyle = bad ? '#ef4444' : '#16a34a'; g.stroke();
+    g.beginPath(); g.arc(p[0], p[1], r * 0.4, 0, 7); g.fillStyle = bad ? '#ef4444' : '#16a34a'; g.fill();
+    const nom = (j.kind === 'gear' || j.kind === 'ring' || j.kind === 'bevel' || j.kind === 'worm') ? meshNominal(j, A, B) : null;
+    let txt = j.auto ? '自动啮合' : '';
+    if (nom != null) txt += (txt ? ' ' : '') + 'i=' + nom.toFixed(3);
+    if (!meshModuleOK(j)) txt += ' ⚠模数不同';
+    if (bad) txt += ' ⚠中心距';
+    if (run) { const t = trLinkText(j); if (t) txt = t; }
+    if (txt) { g.font = px(11) + 'px sans-serif'; g.fillStyle = bad ? '#b91c1c' : '#065f46'; g.textAlign = 'left'; g.fillText(txt, p[0] + px(12), p[1] - px(10)); }
+  } else {
+    const geo = beltGeometry(j); if (!geo) { g.restore(); return; }
+    const c0 = geo.cs[0], off = geo.side[0] * trR(c0) * c0.a;
+    g.beginPath(); for (const s of geo.segs) { if (s.t === 'L') { g.moveTo(s.x0, s.y0); g.lineTo(s.x1, s.y1); } else { g.moveTo(s.cx + s.r * Math.cos(s.a0), s.cy + s.r * Math.sin(s.a0)); g.arc(s.cx, s.cy, s.r, s.a0, s.a0 + s.sw, s.sw < 0); } }
+    if (j.type === 'belt') {
+      if (o.selected) { g.lineWidth = px(9); g.strokeStyle = 'rgba(37,99,235,.35)'; g.stroke(); }
+      g.lineWidth = Math.max(px(4), 1.4); g.strokeStyle = '#1f2937'; g.lineCap = 'butt'; g.stroke();
+      g.setLineDash([5, 7]); g.lineDashOffset = -off; g.lineWidth = Math.max(px(2), 0.7); g.strokeStyle = '#9ca3af'; g.stroke(); g.setLineDash([]); g.lineDashOffset = 0;
+    } else {
+      if (o.selected) { g.lineWidth = px(10); g.strokeStyle = 'rgba(37,99,235,.35)'; g.stroke(); }
+      g.lineWidth = px(1); g.strokeStyle = 'rgba(55,65,81,.35)'; g.stroke();
+      const pt = (c0.type === 'sprocket' ? c0.p : 25) / 10, nl = Math.max(4, Math.round(geo.total / pt));
+      const step = geo.total / nl;
+      for (let i = 0; i < nl; i++) {
+        const q = pathAt(geo, off + i * step), ang = Math.atan2(q.ty, q.tx), len = step * 0.92;
+        g.save(); g.translate(q.x, q.y); g.rotate(ang); g.beginPath(); rr(g, -len / 2, -pt * 0.26, len, pt * 0.52, pt * 0.2);
+        g.fillStyle = i % 2 ? '#d1d5db' : '#6b7280'; g.fill(); g.lineWidth = px(1); g.strokeStyle = '#1f2937'; g.stroke();
+        g.beginPath(); g.arc(-len / 2 + pt * 0.12, 0, pt * 0.09, 0, 7); g.arc(len / 2 - pt * 0.12, 0, pt * 0.09, 0, 7); g.fillStyle = '#111827'; g.fill(); g.restore();
+      }
+    }
+    const p = trJointPoint(j); const r = px(7);
+    g.beginPath(); g.arc(p[0], p[1], r, 0, 7); g.fillStyle = '#fff'; g.fill(); g.lineWidth = px(2); g.strokeStyle = j.type === 'belt' ? '#ea580c' : '#ca8a04'; g.stroke();
+    g.font = px(11) + 'px sans-serif'; g.fillStyle = '#111827'; g.textAlign = 'left';
+    let txt = geo.cs.length === 2 ? (j.type === 'belt' ? 'i=' + ((j.crossed ? -1 : 1) * trR(geo.cs[0]) / trR(geo.cs[1])).toFixed(3) : 'i=' + (geo.cs[0].z / geo.cs[1].z).toFixed(3)) : geo.cs.length + '轮';
+    if (run) { const t = trLinkText(j); if (t) txt = t; }
+    g.fillText(txt, p[0] + px(10), p[1] - px(9));
+  }
+  g.restore();
+}
 /* ===================== 示例装配（全部由同一套自由零件搭成） ===================== */
 function lcl(c, wp) {
-  if (isForce(c)) { const a = wpt(c, [-1, 0]), b = wpt(c, [1, 0]); return Math.hypot(a[0] - wp[0], a[1] - wp[1]) < Math.hypot(b[0] - wp[0], b[1] - wp[1]) ? [-1, 0] : [1, 0]; }
+  if (isLine(c)) { const a = wpt(c, [-1, 0]), b = wpt(c, [1, 0]); return Math.hypot(a[0] - wp[0], a[1] - wp[1]) < Math.hypot(b[0] - wp[0], b[1] - wp[1]) ? [-1, 0] : [1, 0]; }
   return toLocal(c, wp[0], wp[1]);
 }
 function jn(type, A, B, wp, o) {
@@ -1248,6 +2251,158 @@ function loadPreset(i) {
   beginEdit(); resetModel(); PRESETS[i].build(); syncSprings(); endEdit();
   select(null, null); updateUndoUI(); fitView(PRESETS[i].bounds); setMsg('已载入示例：' + PRESETS[i].name + ' —— ' + PRESETS[i].desc);
 }
+/* ===================== 传动示例 ===================== */
+function shaftPin(c, p) { return jn('pin', c, null, p); }
+function flywheelOn(c, extra, o) { // 与 c 同轴焊接的飞轮(负载)
+  const f = newComp('flywheel', c.x, c.y, Object.assign({ r: extra, ri: extra - 7, name: '负载飞轮' }, o || {})); jn('weld', c, f, [c.x, c.y]); return f;
+}
+PRESETS.push(
+  {
+    name: '两级齿轮减速器 (传动零件)', bounds: [60, 190, 330, 420], desc: '电机 → 小齿轮z12 ⇒ 大齿轮z36(与z30同轴) ⇒ z60 输出轮(带飞轮负载)；总传动比 1/6：600 rpm → 100 rpm，右侧面板显示输入/输出转速与总传动比',
+    build() {
+      const y = 300;
+      const base = newComp('ground', 190, y + 80, { w: 360, h: 10, collide: false, name: '机座' });
+      const motor = newComp('motor', 150, y, { rpm: 600, maxT: 200, name: '电机' });
+      const g1 = newComp('gear', 150, y, { m: 10, z: 12, name: '输入齿轮 z12' });
+      const g2 = newComp('gear', 174, y, { m: 10, z: 36, name: '中间轮 z36' });
+      const g3 = newComp('gear', 174, y, { m: 10, z: 30, name: '中间小轮 z30' });
+      const g4 = newComp('gear', 219, y, { m: 10, z: 60, name: '输出齿轮 z60' });
+      const fw = flywheelOn(g4, 34, { name: '负载飞轮' });
+      jn('pin', motor, g1, [150, y]); shaftPin(g2, [174, y]); jn('weld', g2, g3, [174, y]); shaftPin(g4, [219, y]);
+      createMesh(g1, g2); createMesh(g3, g4);
+      M.io = { inId: g1.id, outId: g4.id };
+    }
+  },
+  {
+    name: '皮带传动 (传动零件)', bounds: [60, 190, 420, 410], desc: '电机 + 主动轮 r=15 + 从动轮 r=30 + 开口皮带；转速比 r1/r2 = 0.5，打滑拉力可在连接属性里设置',
+    build() {
+      const y = 300;
+      const motor = newComp('motor', 160, y, { rpm: 240, maxT: 120, name: '电机' });
+      const p1 = newComp('pulley', 160, y, { r: 15, name: '主动轮 r15' });
+      const p2 = newComp('pulley', 280, y, { r: 30, name: '从动轮 r30' });
+      jn('pin', motor, p1, [160, y]); shaftPin(p2, [280, y]);
+      flywheelOn(p2, 34, { name: '负载飞轮' });
+      const b = createBelt('belt', [p1.id, p2.id]);
+      M.io = { inId: p1.id, outId: p2.id };
+    }
+  },
+  {
+    name: '链传动 (传动零件)', bounds: [60, 190, 420, 410], desc: '电机 + 主动链轮 z12 + 从动链轮 z30 + 链条(节距40mm)；传动比 z1/z2 = 0.4，同向转动',
+    build() {
+      const y = 300;
+      const motor = newComp('motor', 150, y, { rpm: 150, maxT: 150, name: '电机' });
+      const s1 = newComp('sprocket', 150, y, { z: 12, p: 40, name: '主动链轮 z12' });
+      const s2 = newComp('sprocket', 270, y, { z: 30, p: 40, name: '从动链轮 z30' });
+      jn('pin', motor, s1, [150, y]); shaftPin(s2, [270, y]);
+      flywheelOn(s2, 24, { name: '负载飞轮', r: 24, ri: 18 });
+      createBelt('chain', [s1.id, s2.id]);
+      M.io = { inId: s1.id, outId: s2.id };
+    }
+  },
+  {
+    name: '凸轮-从动件 (传动零件)', bounds: [140, 120, 460, 420], desc: '电机 30 rpm + 简谐升程凸轮(升程20cm: 升120°/远休60°/回120°) + 滚子从动件 + 回位弹簧；从动件做升-停-降-停的往复运动，选中从动件可看位移曲线',
+    build() {
+      const cx = 300, cy = 340, y0 = cy;
+      const motor = newComp('motor', cx, cy, { rpm: 30, maxT: 150, name: '电机' });
+      const cam = newComp('cam', cx, cy, { kind: 'harmonic', Rb: 25, h: 20, rise: 120, dwell: 60, ret: 120, name: '凸轮' });
+      const fol = newComp('follower', cx, cy - 120, { L: 80, w: 12, tip: 'roller', rr: 8, k: 1500, pre: 2, name: '从动件', trace: false });
+      const rho = camRhoRaw(cam, -Math.PI / 2 - cam.a, 8);
+      fol.y = cy - rho - fol.L / 2; fol.x = cx;
+      jn('pin', motor, cam, [cx, cy]);
+      createMesh(cam, fol);
+      M.io = null;
+    }
+  },
+  {
+    name: '偏心凸轮 (尖底从动件)', bounds: [140, 120, 460, 420], desc: '偏心圆凸轮(R=25, e=10) + 尖底从动件：位移是正弦曲线，行程 2e = 20 cm',
+    build() {
+      const cx = 300, cy = 340;
+      const motor = newComp('motor', cx, cy, { rpm: 40, maxT: 150, name: '电机' });
+      const cam = newComp('cam', cx, cy, { kind: 'ecc', R: 25, e: 10, name: '偏心凸轮' });
+      const fol = newComp('follower', cx, cy - 120, { L: 80, w: 12, tip: 'knife', k: 1500, pre: 2, name: '从动件' });
+      fol.y = cy - camRhoRaw(cam, -Math.PI / 2 - cam.a, 0) - fol.L / 2;
+      jn('pin', motor, cam, [cx, cy]); createMesh(cam, fol);
+    }
+  },
+  {
+    name: '齿轮齿条 (传动零件)', bounds: [-20, 100, 520, 330], desc: '电机 12 rpm + 小齿轮 z16(r=8cm) + 齿条 z60 + 滑块负载；齿条线速度 v = r·ω = 10.05 cm/s',
+    build() {
+      const x = 250, y = 200;
+      const rack = newComp('rack', x, y + 8 + 5, { m: 10, z: 60, h: 10, name: '齿条 z60' });
+      const motor = newComp('motor', x, y, { rpm: 12, maxT: 200, name: '电机' });
+      const pin = newComp('gear', x, y, { m: 10, z: 16, name: '小齿轮 z16' });
+      const load = newComp('block', x, y + 13 + 5 + 14, { w: 50, h: 28, massManual: true, mass: 5, name: '负载滑块' });
+      jn('pin', motor, pin, [x, y]); jn('weld', rack, load, [x, y + 18]);
+      createMesh(pin, rack);
+      M.io = null;
+    }
+  },
+  {
+    name: '丝杠螺母 (传动零件)', bounds: [60, 190, 460, 410], desc: '电机 60 rpm + 丝杠(导程 5 cm/转) + 螺母 + 负载；螺母线速度 v = lead·ω/2π = 5 cm/s',
+    build() {
+      const x = 260, y = 300;
+      const motor = newComp('motor', x, y, { rpm: 60, maxT: 200, name: '电机' });
+      const sc = newComp('screw', x, y, { lead: 5, Ls: 200, r: 3, name: '丝杠' });
+      const nut = newComp('nut', x - 70, y, { w: 30, h: 26, name: '螺母' });
+      const load = newComp('block', x - 70, y + 26, { w: 40, h: 26, massManual: true, mass: 4, name: '负载', collide: false });
+      jn('pin', motor, sc, [x, y]); jn('weld', nut, load, [x - 70, y + 13]);
+      createMesh(sc, nut);
+    }
+  },
+  {
+    name: '蜗杆蜗轮 (自锁)', bounds: [100, 100, 420, 330], desc: '电机 300 rpm + 单头蜗杆 + 蜗轮 z30：减速比 30:1 (10 rpm)，带自锁选项',
+    build() {
+      const x = 260, y = 190;
+      const wm = newComp('wormwheel', x, y + 15 + 8, { m: 10, z: 30, name: '蜗轮 z30' });
+      const motor = newComp('motor', x, y, { rpm: 300, maxT: 100, name: '电机' });
+      const worm = newComp('worm', x, y, { r: 8, Lw: 70, starts: 1, axd: 0, name: '蜗杆' });
+      jn('pin', motor, worm, [x, y]); shaftPin(wm, [x, y + 23]);
+      const j = createMesh(worm, wm); if (j) { j.lock = true; }
+      M.io = { inId: worm.id, outId: wm.id };
+    }
+  },
+  {
+    name: '槽轮机构 (间歇运动)', bounds: [140, 180, 520, 440], desc: '电机 30 rpm 拨盘 + 4 槽槽轮：拨盘每转一周，槽轮转 90° 后停歇（铝制，惯量较大需较大电机扭矩）',
+    build() {
+      const x = 230, y = 300, a = 85;
+      const motor = newComp('motor', x, y, { rpm: 30, maxT: 3000, name: '电机' });
+      const pin = newComp('gpin', x, y, { n: 4, mat: '铝', t: 1, name: '拨盘' });
+      const gv = newComp('geneva', x + a, y, { n: 4, R: 60, mat: '铝', t: 1, name: '槽轮' });
+      jn('pin', motor, pin, [x, y]); shaftPin(gv, [x + a, y]);
+      createMesh(pin, gv);
+    }
+  },
+  {
+    name: '离合器 + 飞轮', bounds: [60, 200, 420, 410], desc: '电机 → 小飞轮 → 离合器(扭矩上限 30 N·m) → 大飞轮：先打滑再同步；选中离合器可切换“接合”',
+    build() {
+      const y = 300;
+      const motor = newComp('motor', 150, y, { rpm: 120, maxT: 120, name: '电机' });
+      const f1 = newComp('flywheel', 150, y, { r: 20, ri: 12, name: '主动飞轮' });
+      const f2 = newComp('flywheel', 250, y, { r: 36, ri: 26, t: 4, name: '从动飞轮' });
+      const cl = newComp('clutch', 200, y, { L: 100, maxT: 30, name: '离合器' });
+      jn('pin', motor, f1, [150, y]); shaftPin(f2, [250, y]);
+      jn('pin', cl, f1, [150, y]); jn('pin', cl, f2, [250, y]);
+      M.io = { inId: f1.id, outId: f2.id };
+    }
+  },
+  {
+    name: '棘轮棘爪 (摇杆步进)', bounds: [140, 130, 560, 420], desc: '电机曲柄 + 连杆 + 摇杆(棘爪驱动) → 棘轮：摇杆往复摆动，棘轮单向步进，保持棘爪防倒转',
+    build() {
+      const P = [260, 300], d = 130, a = 35, b = 110, c = 70, O = [P[0] + d, P[1]], a0 = Math.PI * 0.8;
+      const B = [O[0] + a * Math.cos(a0), O[1] + a * Math.sin(a0)];
+      const Q = circInter(B, b, P, c, true);
+      const ang = Math.atan2(Q[1] - P[1], Q[0] - P[0]);
+      const ratchet = newComp('ratchet', P[0], P[1], { z: 20, r: 26, a: ang, name: '棘轮' });
+      const lever = rodBetween(P, [P[0] + Math.cos(ang) * 95, P[1] + Math.sin(ang) * 95], { mass: 0.5, name: '摇杆' });
+      const motor = newComp('motor', O[0], O[1], { rpm: 30, maxT: 200, name: '电机' });
+      const crank = rodBetween(O, B, { mass: 0.6, name: '曲柄' });
+      const coup = rodBetween(B, Q, { mass: 0.6, name: '连杆' });
+      shaftPin(ratchet, P); shaftPin(lever, P);
+      jn('pin', motor, crank, O); jn('pin', crank, coup, B); jn('pin', coup, lever, Q);
+      createMesh(lever, ratchet);
+    }
+  }
+);
 /* ===================== 交互 / UI ===================== */
 const sel_ = { kind: null, id: null };
 const ui = { tool: 'select', hoverComp: null, hoverPt: null, first: null, mouse: null, drag: null, armed: null };
@@ -1285,13 +2440,14 @@ function buildPalette() {
   }
 }
 function drawJointMarkerIcon(x, type) {
+  if (isTrTool(type)) { trToolIcon(x, type); return; }
   const col = COL[type]; x.lineWidth = 2; x.strokeStyle = col;
   if (type === 'pin') { x.beginPath(); x.arc(0, 0, 8, 0, 7); x.fillStyle = '#fff'; x.fill(); x.stroke(); x.beginPath(); x.arc(0, 0, 3, 0, 7); x.fillStyle = col; x.fill(); }
   if (type === 'slide') { x.beginPath(); x.rect(-8, -6, 16, 12); x.fillStyle = '#ffedd5'; x.fill(); x.stroke(); x.beginPath(); x.moveTo(-12, 0); x.lineTo(12, 0); x.stroke(); }
   if (type === 'weld') { x.beginPath(); x.moveTo(0, -10); x.lineTo(10, 0); x.lineTo(0, 10); x.lineTo(-10, 0); x.closePath(); x.fillStyle = '#fee2e2'; x.fill(); x.stroke(); x.beginPath(); x.moveTo(-4, -4); x.lineTo(4, 4); x.moveTo(4, -4); x.lineTo(-4, 4); x.stroke(); }
 }
 function setTool(t) {
-  ui.tool = t; ui.first = null; ui.hoverPt = null; ui.armed = null;
+  ui.tool = t; ui.first = null; ui.hoverPt = null; ui.armed = null; ui.beltList = [];
   document.querySelectorAll('.tool').forEach(d => d.classList.toggle('sel', d.dataset.tool === t));
   document.querySelectorAll('.item').forEach(d => d.classList.remove('armed'));
   cv.style.cursor = t === 'select' ? 'default' : 'crosshair'; setHint(); setMsg(t === 'select' ? '就绪' : '当前工具：' + TOOLS.find(a => a[0] === t)[1]);
@@ -1452,13 +2608,15 @@ cv.addEventListener('pointerdown', e => {
     return;
   }
   if (ui.armed) { placeComp(ui.armed, w[0], w[1]); return; }
-  if (ui.tool !== 'select') { jointClick(w[0], w[1]); return; }
+  if (ui.tool !== 'select') { if (isTrTool(ui.tool)) trToolClick(w[0], w[1]); else jointClick(w[0], w[1]); return; }
   // 选择工具
   const sc = selComp();
   if (sc) {
     for (const h of selHandles(sc)) {
       if (Math.hypot(h.p[0] - w[0], h.p[1] - w[1]) * view.k < 11) {
-        beginEdit(); ui.drag = { kind: h.kind === 'rot' ? 'rot' : 'end', c: sc, which: h.kind === 'end0' ? 0 : 1 }; return;
+        beginEdit();
+        if (needsSolve(sc) && (h.kind === 'rot' ? rotNeedsSolve(sc) : endHasJoint(sc, h.kind === 'end0' ? 0 : 1)) && dragBegin(sc, h.p)) { ui.drag = { kind: 'solve', c: sc }; return; }
+        ui.drag = { kind: h.kind === 'rot' ? 'rot' : 'end', c: sc, which: h.kind === 'end0' ? 0 : 1 }; return;
       }
     }
   }
@@ -1470,6 +2628,7 @@ cv.addEventListener('pointerdown', e => {
   if (hc) {
     select('comp', hc.id);
     beginEdit();
+    if (needsSolve(hc) && dragBegin(hc, w)) { ui.drag = { kind: 'solve', c: hc }; return; }
     // 抓取的锚点：最近的局部点
     let ga = [0, 0], bd = 1e9; for (const p of pts(hc)) { const q = wpt(hc, p.l); const d = Math.hypot(q[0] - w[0], q[1] - w[1]); if (d < bd) { bd = d; ga = p.l; } }
     if (isForce(hc)) ga = [0, 0];
@@ -1486,6 +2645,7 @@ cv.addEventListener('pointermove', e => {
   if (d) {
     if (d.kind === 'pan') { view.x = d.vx + sx - d.sx; view.y = d.vy + sy - d.sy; return; }
     if (d.kind === 'grab') { if (sim.grab) { sim.grab.tx = w[0] / S; sim.grab.ty = w[1] / S; } return; }
+    if (d.kind === 'solve') { dragTarget(w); dragStep(8); renderPropsPos(); return; }
     if (d.kind === 'move') {
       const c = d.c; const gx = d.gw0[0] + (w[0] - d.start[0]), gy = d.gw0[1] + (w[1] - d.start[1]);
       const tx = snap(gx), ty = snap(gy);
@@ -1498,7 +2658,7 @@ cv.addEventListener('pointermove', e => {
     if (d.kind === 'rot') {
       const c = d.c; let a = Math.atan2(w[1] - c.y, w[0] - c.x) + Math.PI / 2;
       if (!e.altKey) a = Math.round(a / (Math.PI / 12)) * (Math.PI / 12);
-      c.a = a; d.moved = true; syncSprings(); renderPropsPos(); return;
+      if (c.type === 'worm' || c.type === 'screw') c.axd = a / D2R; else c.a = a; d.moved = true; syncSprings(); renderPropsPos(); return;
     }
     if (d.kind === 'end') {
       const c = d.c; const other = endPts(c)[d.which === 0 ? 1 : 0];
@@ -1513,7 +2673,8 @@ cv.addEventListener('pointermove', e => {
   }
   // 悬停
   if (sim.mode === 'edit') {
-    if (ui.tool !== 'select') {
+    if (isTrTool(ui.tool)) { const hc2 = compAt(w[0], w[1]); ui.hoverComp = hc2 ? hc2.id : null; }
+    else if (ui.tool !== 'select') {
       ui.hoverPt = pickPoint(w[0], w[1], ui.first ? ui.first.c : null);
     } else { const c = compAt(w[0], w[1]); ui.hoverComp = c ? c.id : null; }
   }
@@ -1521,6 +2682,7 @@ cv.addEventListener('pointermove', e => {
 function endDrag(e) {
   const d = ui.drag; ui.drag = null; if (!d) return;
   if (d.kind === 'grab') { sim.grab = null; return; }
+  if (d.kind === 'solve') { if (ui.mouse) dragTarget(ui.mouse); dragStep(60); dragEnd(); const ch = endEdit(); updateUndoUI(); renderProps(); return; }
   if (d.kind === 'move' || d.kind === 'rot' || d.kind === 'end') { const ch = endEdit(); updateUndoUI(); if (ch) renderProps(); }
 }
 cv.addEventListener('pointerup', endDrag); cv.addEventListener('pointercancel', endDrag);
@@ -1537,7 +2699,7 @@ function deleteSelection() {
   const c = selComp(), j = selJoint();
   if (!c && !j) return;
   beginEdit();
-  if (c) { M.joints = M.joints.filter(x => x.a !== c.id && x.b !== c.id); M.comps = M.comps.filter(x => x !== c); setMsg('已删除 ' + c.name); }
+  if (c) { M.joints = M.joints.filter(x => !jointHas(x, c.id)); M.comps = M.comps.filter(x => x !== c); setMsg('已删除 ' + c.name); }
   else { M.joints = M.joints.filter(x => x !== j); setMsg('已删除连接'); }
   endEdit(); select(null, null); updateUndoUI();
 }
@@ -1545,7 +2707,7 @@ function duplicateSel() {
   const c = selComp(); if (!c || sim.mode !== 'edit') return;
   beginEdit(); const n = JSON.parse(JSON.stringify(c)); n.id = 'c' + (M.nextId++); M.counters[c.type] = (M.counters[c.type] || 0) + 1; n.name = TYPES[c.type].label + M.counters[c.type]; n.x += 20; n.y += 20; M.comps.push(n); endEdit(); select('comp', n.id); updateUndoUI();
 }
-function rotateSel(deg) { const c = selComp(); if (!c || sim.mode !== 'edit') return; beginEdit(); c.a += deg * Math.PI / 180; syncSprings(); endEdit(); renderProps(); updateUndoUI(); }
+function rotateSel(deg) { const c = selComp(); if (!c || sim.mode !== 'edit') return; beginEdit(); if (c.type === 'worm' || c.type === 'screw') c.axd = (c.axd || 0) + deg; else c.a += deg * Math.PI / 180; syncSprings(); endEdit(); renderProps(); updateUndoUI(); }
 function undo() {
   if (sim.mode !== 'edit') { setMsg('运行中无法撤销'); return; }
   if (!undoStack.length) return; redoStack.push(snapJSON()); M = JSON.parse(undoStack.pop()); fixSel(); updateUndoUI(); renderProps(); setMsg('已撤销');
@@ -1585,6 +2747,7 @@ function renderProps() {
       case 'ball': h += f('半径', 'r', rd(c.r), 'cm', 'step="1" min="3"'); break;
       case 'spring': h += f('当前长度', 'L', rd(c.L), 'cm', 'step="10" min="10"') + f('刚度 k', 'k', c.k, 'N/m', 'step="10" min="0"') + f('原长', 'restLen', rd(c.restLen), 'cm', 'step="10" min="5"') + fc('原长自动', 'restAuto', c.restAuto, '=装配时的长度') + f('内阻尼 c', 'c', c.c, 'N·s/m', 'step="0.5" min="0"'); break;
       case 'damper': h += f('长度', 'L', rd(c.L), 'cm', 'step="10" min="10"') + f('阻尼 c', 'c', c.c, 'N·s/m', 'step="5" min="0"'); break;
+      default: if (isTr(c)) h += trProps(c); break;
       case 'motor': h += fs('模式', 'mode', c.mode, [['speed', '定转速'], ['torque', '定扭矩']]) + f('转速', 'rpm', c.rpm, 'rpm', 'step="10"') + f('扭矩', 'torque', c.torque, 'N·m', 'step="5"') + f('最大扭矩', 'maxT', c.maxT, 'N·m', 'step="50" min="1"') + `<div style="color:#6b7280;font-size:12px">正值=顺时针。用「铰链」把电机中心与杆件/轮子连接，即可驱动它。</div>`; break;
     }
     if (isDyn(c) || c.type === 'ground') {
@@ -1599,6 +2762,8 @@ function renderProps() {
     }
     const js = jointsOf(c.id); h += `<div style="margin-top:6px;color:#6b7280;font-size:12px">连接：${js.length ? js.map(x => JTYPES[x.type]).join('、') : '无'}</div>`;
     h += `<button class="del" data-act="del">删除零件 (Del)</button> <button class="tb" style="background:#e5e7eb;color:#111;margin-top:6px" data-act="dup">复制</button>`;
+  } else if (isTrJoint(j)) {
+    h += trJointProps(j);
   } else {
     const a = compById(j.a), b = compById(j.b); const gap = jointGap(j);
     h += `<div class="title">${JTYPES[j.type]}　<span style="font-weight:400;color:#6b7280">${j.id}</span></div>`;
@@ -1615,7 +2780,7 @@ function renderProps() {
   }
   el.innerHTML = h;
   const dis = sim.mode !== 'edit';
-  el.querySelectorAll('input,select,button').forEach(x => { if (dis && !['trace', 'tracePt'].includes(x.dataset.k)) x.disabled = true; });
+  el.querySelectorAll('input,select,button').forEach(x => { if (dis && !['trace', 'tracePt', 'engaged', 'pawl'].includes(x.dataset.k)) x.disabled = true; });
   updateReadout();
 }
 function renderPropsPos() { // 拖动中只刷新 x/y/a 字段
@@ -1623,7 +2788,7 @@ function renderPropsPos() { // 拖动中只刷新 x/y/a 字段
   for (const k of ['x', 'y', 'a', 'L']) { const i = el.querySelector(`[data-k="${k}"]`); if (i && document.activeElement !== i) i.value = rd(k === 'a' ? c.a * 180 / Math.PI : c[k]); }
 }
 $('props').addEventListener('change', e => {
-  const t = e.target, k = t.dataset.k; if (!k || sim.mode !== 'edit' && !['trace', 'tracePt'].includes(k)) return;
+  const t = e.target, k = t.dataset.k; if (!k || sim.mode !== 'edit' && !['trace', 'tracePt', 'engaged', 'pawl'].includes(k)) return;
   let v = t.type === 'checkbox' ? t.checked : t.type === 'number' ? parseFloat(t.value) : t.value;
   if (t.type === 'number' && !isFinite(v)) { renderProps(); return; }
   const c = selComp(), j = selJoint();
@@ -1637,7 +2802,9 @@ $('props').addEventListener('click', e => {
 });
 function applyCompProp(c, k, v) {
   const clampMin = (x, m) => Math.max(m, x);
+  if (sim.mode !== 'edit' && (k === 'engaged' || k === 'pawl')) { c[k] = v; return; }
   edit(() => {
+    if (isTr(c) && trApplyProp(c, k, v)) return;
     switch (k) {
       case 'name': c.name = v || c.name; break;
       case 'x': case 'y':
@@ -1666,6 +2833,7 @@ function applyCompProp(c, k, v) {
 function applyJointProp(j, k, v) {
   edit(() => {
     switch (k) {
+      case 'eff': j.eff = Math.max(0.05, Math.min(1, v)); break;
       case 'jtype': j.type = v; if (v === 'slide' && j.axis == null) { j.axis = longAxisAngle(compById(j.a) || { type: 'x' }); j.lo = -100; j.hi = 100; j.limit = false; } break;
       case 'axis': j.axis = v * Math.PI / 180; break;
       default: j[k] = v;
@@ -1674,11 +2842,24 @@ function applyJointProp(j, k, v) {
 }
 
 /* ---- 模式/工具栏 ---- */
+function endHasJoint(c, which) { // 杆件某一端是否有连接
+  const x = (which === 0 ? -1 : 1) * c.L / 2;
+  return M.joints.some(j => !isTrJoint(j) && ((j.a === c.id && Math.abs(j.pa[0] - x) < 1 && Math.abs(j.pa[1]) < 1) || (j.b === c.id && j.pb && Math.abs(j.pb[0] - x) < 1 && Math.abs(j.pb[1]) < 1)));
+}
+function setInitial() {
+  if (sim.mode !== 'edit') { setInitFromRun(); return; }
+  captureInit(); setMsg('已把当前布局设为初始状态：之后点「重置」都会回到这里（编辑模式下初始状态自动跟随布局）');
+}
+function setInitFromRun() {
+  if (sim.mode === 'edit') { setInitial(); return; }
+  const old = modelAtInit(); undoStack.push(JSON.stringify(old)); if (undoStack.length > 200) undoStack.shift(); redoStack.length = 0;
+  captureInit(); updateUndoUI(); setMsg('已把当前运行姿态设为新的初始状态（速度清零）；点「重置」回到该姿态，可「撤销」恢复旧初始状态');
+}
 function updateModeUI() {
   const m = sim.mode; const b = $('modeBadge');
   b.textContent = m === 'edit' ? '编辑模式' : m === 'run' ? '运行中' : '已暂停'; b.className = m === 'edit' ? '' : m;
   $('btnRun').disabled = m === 'run'; $('btnRun').textContent = m === 'pause' ? '▶ 继续' : '▶ 运行';
-  $('btnPause').disabled = m !== 'run'; $('btnReset').disabled = m === 'edit';
+  $('btnPause').disabled = m !== 'run'; $('btnReset').disabled = m === 'edit'; $('btnSetInitRun').disabled = m === 'edit';
   $('energy').style.display = m === 'edit' ? 'none' : 'block';
   updateUndoUI(); setHint();
 }
@@ -1694,14 +2875,19 @@ function updateReadout() {
     h += `速度 vx=${f2(b.vx)}, vy=${f2(-b.vy)} m/s<br>速率 |v|=<b>${f2(Math.hypot(b.vx, b.vy))}</b> m/s<br>角速度 ω=${f2(b.w)} rad/s (${f2(b.w * 30 / Math.PI, 1)} rpm)<br>角度 θ=${f2(b.a * 180 / Math.PI % 360, 1)}°<br>`;
     h += `动能 ${f2(ke)} J<br>净力 F合=<b>${f2(Math.hypot(b.fnetX || 0, b.fnetY || 0))}</b> N (Fx=${f2(b.fnetX || 0)}, Fy=${f2(-(b.fnetY || 0))})<br>`;
     h += `约束/接触反力 ≈ ${f2(Math.hypot(b.freactX || 0, b.freactY || 0))} N　重力 ${f2(b.m * g9)} N`;
+    if (isTr(c)) h += trCompReadout(c, b);
+  } else if (c && isConn(c) && sim.rowsOf[c.id]) {
+    h += `<b>${c.name}</b><br>` + trLinkReadout({ id: c.id, type: 'mesh', kind: c.type, a: null, b: null, auto: false }).replace(/^<b>.*?<\/b><br>/, '');
   } else if (c && isForce(c)) {
     const sp = sim.springOf[c.id];
     if (sp) h += `<b>${c.name}</b><br>当前长度 ${f2(sp.len * 100, 1)} cm，原长 ${f2(sp.L0 * 100, 1)} cm<br>${c.type === 'spring' ? '弹力' : '阻尼力'} ${f2(sp.fAvg || 0)} N<br>弹性势能 ${f2(0.5 * sp.k * (sp.len - sp.L0) ** 2)} J`;
+  } else if (j && isTrJoint(j)) {
+    h += trLinkReadout(j);
   } else if (j && sim.jointOf[j.id]) {
     const J = sim.jointOf[j.id];
     h += `<b>${JTYPES[j.type]}</b> 反力<br>Fx=${f2(J.fAvgX || 0)} N, Fy=${f2(-(J.fAvgY || 0))} N<br>|F|=<b>${f2(Math.hypot(J.fAvgX || 0, J.fAvgY || 0))}</b> N`;
     if (J.motor && J.motor.mode === 'speed') h += `<br>电机输出扭矩 ≈ ${f2(J.tAvg || 0)} N·m`;
-  } else h += '选中一个零件以查看速度、受力与轨迹';
+  } else { h += trSummary() || '选中一个零件以查看速度、受力与轨迹'; if (!M.io && !M.joints.some(isTrJoint)) h = '选中一个零件以查看速度、受力与轨迹'; }
   $('readout').innerHTML = h;
   const E = sim.energy;
   if (E) {
@@ -1730,8 +2916,9 @@ function drawPlot() {
 function download(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
 const stamp = () => { const d = new Date(), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`; };
 function modelJSON() {
-  const model = sim.mode !== 'edit' && sim.snapshot ? JSON.parse(sim.snapshot) : M;
-  return JSON.stringify({ format: 'mech-sandbox', version: 1, settings: { gravity: sim.gravity, speed: sim.speed }, model }, null, 1);
+  if (sim.mode === 'edit') captureInit();
+  const model = sim.mode !== 'edit' && sim.snapshot ? modelAtInit() : M;
+  return JSON.stringify({ format: 'mech-sandbox', version: 2, settings: { gravity: sim.gravity, speed: sim.speed, autoMesh: sim.autoMesh }, model }, null, 1);
 }
 function saveFile() { const s = modelJSON(); download('assembly-' + stamp() + '.json', new Blob([s], { type: 'application/json' })); setMsg('已保存装配 JSON'); return s; }
 function loadFromObject(o) {
@@ -1739,7 +2926,8 @@ function loadFromObject(o) {
   if (sim.mode !== 'edit') resetRun();
   beginEdit();
   M = o.model; M.nextId = M.nextId || (M.comps.length + 100); M.nextJ = M.nextJ || (M.joints.length + 100); M.counters = M.counters || {};
-  if (o.settings) { sim.gravity = o.settings.gravity !== false; $('chkGravity').checked = sim.gravity; }
+  if (o.settings) { sim.gravity = o.settings.gravity !== false; $('chkGravity').checked = sim.gravity; sim.autoMesh = o.settings.autoMesh !== false; const ca = $('chkAuto'); if (ca) ca.checked = sim.autoMesh; }
+  if (!M.init) captureInit(); else if (M.init.poses) { /* 载入文件里保存的初始状态 */ }
   endEdit(); select(null, null); updateUndoUI(); fitView(); syncSprings();
 }
 function loadFile(file) {
@@ -1748,7 +2936,7 @@ function loadFile(file) {
 }
 const csvq = v => { v = String(v == null ? '' : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
 function bomCSV() {
-  const src = sim.mode !== 'edit' && sim.snapshot ? JSON.parse(sim.snapshot) : M;
+  const src = sim.mode !== 'edit' && sim.snapshot ? modelAtInit() : M;
   const old = M; M = src;
   const rows = [['零件清单 (BOM)'], ['序号', '名称', '类型', '尺寸(cm)', '质量(kg)', '材料', 'X(cm)', 'Y(cm)', '角度(°)', '参数']];
   let tot = 0, n = 0;
@@ -1758,6 +2946,7 @@ function bomCSV() {
     if (c.type === 'spring') p = `刚度 ${c.k} N/m; 原长 ${rd(c.restLen)} cm; 阻尼 ${c.c} N·s/m`;
     else if (c.type === 'damper') p = `阻尼 ${c.c} N·s/m`;
     else if (c.type === 'motor') p = c.mode === 'speed' ? `定转速 ${c.rpm} rpm; 最大扭矩 ${c.maxT} N·m` : `定扭矩 ${c.torque} N·m`;
+    else if (isTr(c)) p = trParamText(c);
     else if (isDyn(c) || c.type === 'ground') p = `μ=${rd(c.mu)}; e=${rd(c.e)}; 碰撞=${c.collide ? '是' : '否'}`;
     rows.push([n, c.name, TYPES[c.type].label, dimsText(c), isDyn(c) ? rd(m * 1000) / 1000 : (c.type === 'ground' ? '固定' : '-'), isDyn(c) || c.type === 'ground' ? c.mat : '-', rd(c.x), rd(c.y), rd(c.a * 180 / Math.PI), p]);
   }
@@ -1768,6 +2957,7 @@ function bomCSV() {
     let note = '';
     if (j.type === 'slide') note = `轨道角度 ${rd(((compById(j.a) ? compById(j.a).a : 0) + (j.axis || 0)) * 180 / Math.PI)}°` + (j.limit ? `; 行程 ${j.lo}~${j.hi} cm` : '');
     if (j.type === 'pin' && ((a && a.type === 'motor') || (b && b.type === 'motor'))) note = '电机驱动铰链';
+    if (isTrJoint(j)) note = trJointNote(j);
     rows.push([j.id, JTYPES[j.type], a ? a.name : '地面', b ? b.name : '地面(世界)', rd(w[0]), rd(w[1]), note]);
   }
   M = old;
@@ -1780,7 +2970,7 @@ function fitView(extra) {
   const W = cv.width / dpr, H = cv.height / dpr; if (!M.comps.length) { view.k = 1; view.x = 120; view.y = 80; return; }
   let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
   for (const c of M.comps) {
-    const ext = c.type === 'ground' ? Math.min(c.w / 2, 400) + 10 : (c.type === 'rod' || isForce(c)) ? c.L / 2 + 10 : Math.max(c.w || 0, c.h || 0, c.r * 2 || 0, 40) / 2 + 20;
+    const ext = c.type === 'ground' ? Math.min(c.w / 2, 400) + 10 : (c.type === 'rod' || isLine(c)) ? c.L / 2 + 10 : isTr(c) ? extR(c) + 12 : Math.max(c.w || 0, c.h || 0, c.r * 2 || 0, 40) / 2 + 20;
     x0 = Math.min(x0, c.x - ext); x1 = Math.max(x1, c.x + ext); y0 = Math.min(y0, c.y - ext); y1 = Math.max(y1, c.y + ext);
   }
   if (extra) { x0 = Math.min(x0, extra[0]); y0 = Math.min(y0, extra[1]); x1 = Math.max(x1, extra[2]); y1 = Math.max(y1, extra[3]); }
@@ -1791,9 +2981,10 @@ function fitView(extra) {
 /* ---- 键盘 ---- */
 window.addEventListener('keydown', e => {
   const inField = /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName) && document.activeElement.type !== 'checkbox';
-  if (e.key === 'Escape') { if (inField) document.activeElement.blur(); ui.first = null; ui.armed = null; document.querySelectorAll('.item').forEach(d => d.classList.remove('armed')); if (ui.tool !== 'select') setTool('select'); else select(null, null); setHint(); return; }
+  if (e.key === 'Escape') { if (inField) document.activeElement.blur(); ui.first = null; ui.beltList = []; ui.armed = null; document.querySelectorAll('.item').forEach(d => d.classList.remove('armed')); if (ui.tool !== 'select') setTool('select'); else select(null, null); setHint(); return; }
   if (inField) return;
   if (e.code === 'Space') { e.preventDefault(); if (e.repeat) return; if (sim.mode === 'run') pauseRun(); else startRun(); return; }
+  if (e.key === 'Enter' && (ui.tool === 'belt' || ui.tool === 'chain') && ui.beltList.length >= 2) { e.preventDefault(); trFinishBelt(); return; }
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelection(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
@@ -1801,7 +2992,7 @@ window.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveFile(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'r' || e.key === 'R') rotateSel(e.shiftKey ? -15 : 15);
-  else if (e.key === 'v' || e.key === 'V') setTool('select'); else if (e.key === '1') setTool('pin'); else if (e.key === '2') setTool('slide'); else if (e.key === '3') setTool('weld');
+  else if (e.key === 'v' || e.key === 'V') setTool('select'); else if (e.key === '1') setTool('pin'); else if (e.key === '2') setTool('slide'); else if (e.key === '3') setTool('weld'); else if (e.key === '4') setTool('mesh'); else if (e.key === '5') setTool('belt'); else if (e.key === '6') setTool('chain');
 });
 
 /* ---- 初始化 ---- */
@@ -1815,11 +3006,13 @@ function init() {
   $('chkGravity').onchange = e => { sim.gravity = e.target.checked; e.target.blur(); setMsg('重力：' + (sim.gravity ? '开' : '关')); };
   $('selSpeed').onchange = e => { sim.speed = parseFloat(e.target.value); e.target.blur(); };
   $('btnUndo').onclick = undo; $('btnRedo').onclick = redo;
+  $('btnSetInit').onclick = () => { setInitial(); $('btnSetInit').blur(); }; $('btnSetInitRun').onclick = () => { setInitFromRun(); $('btnSetInitRun').blur(); };
   $('btnClear').onclick = () => { if (sim.mode !== 'edit') resetRun(); beginEdit(); M.comps = []; M.joints = []; M.counters = {}; endEdit(); select(null, null); updateUndoUI(); };
   $('btnFit').onclick = () => fitView();
   $('btnSave').onclick = saveFile; $('btnLoad').onclick = () => $('fileIn').click();
   $('fileIn').onchange = e => { if (e.target.files[0]) loadFile(e.target.files[0]); e.target.value = ''; };
   $('btnBom').onclick = exportBOM; $('btnPng').onclick = exportPNG;
+  buildTrPalette();
   window.addEventListener('resize', resizeCanvas);
   resizeCanvas(); updateModeUI(); renderProps(); setHint(); loadPreset(0);
   let last = performance.now(), rt = 0;
@@ -1830,19 +3023,352 @@ function init() {
         sim.acc += dt * sim.speed; const h = sim.world.h; let n = Math.floor(sim.acc / h + 1e-9); sim.acc -= n * h; n = Math.min(n, 100);
         if (n > 0) { stepSim(n); afterSteps(); }
         rt += dt; if (rt > 0.08) { rt = 0; updateReadout(); }
-      } else if (sim.mode === 'edit') syncSprings();
+      } else if (sim.mode === 'edit') { if (dragS.on) dragStep(8); else syncSprings(); }
       draw(); drawPlot();
     } catch (err) { console.error(err); setWarn('内部错误：' + err.message); }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 }
+/* ===================== 传动零件：调色板 / 工具 / 属性面板 / 运行读数 ===================== */
+const PAL_TR = [['gear', '齿轮'], ['ring', '内齿圈'], ['rack', '齿条'], ['bevel', '锥齿轮'], ['worm', '蜗杆'], ['wormwheel', '蜗轮'], ['pulley', '皮带轮'], ['sprocket', '链轮'],
+  ['cam', '凸轮'], ['follower', '从动件'], ['ratchet', '棘轮棘爪'], ['gpin', '拨盘'], ['geneva', '槽轮'], ['flywheel', '飞轮'], ['screw', '丝杠'], ['nut', '螺母'],
+  ['clutch', '联轴器/离合器'], ['gearbox', '减速器'], ['ujoint', '万向节']];
+const TR_TOOLS = [['mesh', '啮合 / 接触', '4'], ['belt', '皮带 (多轮)', '5'], ['chain', '链条 (多链轮)', '6']];
+Object.assign(COL, { mesh: '#16a34a', belt: '#ea580c', chain: '#ca8a04' });
+TOOLS.push(...TR_TOOLS);
+Object.assign(HINTS, {
+  mesh: '啮合/接触：依次点击两个相关零件——齿轮↔齿轮/内齿圈/齿条、锥齿轮对、蜗杆↔蜗轮、丝杠↔螺母、拨盘↔槽轮、凸轮↔从动件、摆杆/任意转动件→棘轮(棘爪驱动)。节圆相切的齿轮也会自动啮合。',
+  belt: '皮带：依次点击各皮带轮(两个或更多)，再按 Enter、点空白处或再点一次最后的轮完成；两轮时可在属性里选“交叉皮带”。',
+  chain: '链条：依次点击各链轮，按 Enter、点空白处或再点一次最后的链轮完成。'
+});
+const isTrTool = t => t === 'mesh' || t === 'belt' || t === 'chain';
+function rotHandleExt(c) {
+  switch (c.type) { case 'worm': case 'screw': return c.r + 2; case 'rack': return c.h / 2 + 2 * addendum(c); case 'follower': return c.w / 2 + 4; case 'nut': return c.h / 2; }
+  return extR(c);
+}
+function buildTrPalette() {
+  const pi = $('palTrans'); if (!pi) return;
+  for (const [key, label] of PAL_TR) {
+    const d = document.createElement('div'); d.className = 'item'; d.dataset.key = key; d.title = label;
+    const c = document.createElement('canvas'); c.width = 60; c.height = 44; d.appendChild(c); d.appendChild(document.createTextNode(label.length > 6 ? label.slice(0, 7) : label)); pi.appendChild(d);
+    drawIcon(c, key);
+    d.addEventListener('pointerdown', e => paletteDown(e, key, d));
+  }
+  const ca = $('chkAuto'); if (ca) ca.onchange = e => { sim.autoMesh = e.target.checked; e.target.blur(); setMsg('自动检测啮合：' + (sim.autoMesh ? '开（节圆相切、模数相同的齿轮/齿条自动啮合）' : '关（仅使用手动「啮合」连接）')); };
+}
+function trToolIcon(x, key) {
+  x.lineWidth = 2; x.strokeStyle = COL[key];
+  if (key === 'mesh') { for (const sx of [-5, 5]) { x.beginPath(); x.arc(sx, 0, 6, 0, 7); x.fillStyle = '#fff'; x.fill(); x.stroke(); for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3; x.beginPath(); x.moveTo(sx + Math.cos(a) * 6, Math.sin(a) * 6); x.lineTo(sx + Math.cos(a) * 8.5, Math.sin(a) * 8.5); x.stroke(); } } }
+  else { for (const sx of [-7, 7]) { x.beginPath(); x.arc(sx, 0, 4.5, 0, 7); x.fillStyle = '#fff'; x.fill(); x.stroke(); } x.beginPath(); x.moveTo(-7, -4.5); x.lineTo(7, -4.5); x.moveTo(-7, 4.5); x.lineTo(7, 4.5); x.setLineDash(key === 'chain' ? [2, 2] : []); x.lineWidth = key === 'chain' ? 3 : 2; x.stroke(); x.setLineDash([]); }
+}
+/* ---- 连接工具点击 ---- */
+ui.beltList = [];
+function trToolClick(wx, wy) {
+  if (sim.mode !== 'edit') return;
+  const c = compAt(wx, wy);
+  if (ui.tool === 'mesh') {
+    if (!c || isLine(c)) { if (ui.first) setMsg('请点击要与之啮合的第二个零件'); else setMsg('请先点击一个传动零件'); return; }
+    if (!ui.first) { ui.first = { c, l: [0, 0] }; setMsg('已选第一个零件：' + c.name + '，请点击与它啮合/接触的零件'); return; }
+    if (ui.first.c === c) { setMsg('不能与自身啮合'); return; }
+    beginEdit(); const j = createMesh(ui.first.c, c); endEdit(); updateUndoUI();
+    if (j) { select('joint', j.id); setMsg('已创建：' + meshLabel(j) + (meshGap(j) > 1 ? '（中心距有 ' + rd(meshGap(j)) + ' cm 偏差，请调整位置）' : '')); }
+    ui.first = null; return;
+  }
+  // belt / chain
+  const need = ui.tool === 'belt' ? 'pulley' : 'sprocket';
+  if (c && c.type === need) {
+    const L = ui.beltList;
+    if (L.length >= 2 && L[L.length - 1] === c.id) { trFinishBelt(); return; }
+    if (L.indexOf(c.id) < 0) L.push(c.id);
+    setMsg('已选 ' + L.length + ' 个' + (need === 'pulley' ? '皮带轮' : '链轮') + '：' + L.map(id => compById(id).name).join(' → ') + '（Enter/点空白处完成）');
+    return;
+  }
+  if (!c) { if (ui.beltList.length >= 2) trFinishBelt(); else setMsg('请至少选择两个' + (need === 'pulley' ? '皮带轮' : '链轮')); return; }
+  setMsg('这个工具只能连接' + (need === 'pulley' ? '皮带轮' : '链轮'));
+}
+function trFinishBelt() {
+  const L = ui.beltList.slice(); ui.beltList = []; if (L.length < 2) return;
+  beginEdit(); const j = createBelt(ui.tool, L); endEdit(); updateUndoUI();
+  if (j) { select('joint', j.id); setMsg('已创建' + JTYPES[j.type] + '：' + L.map(id => compById(id).name).join(' → ')); }
+}
+function drawTrToolOverlay(g) {
+  g.save();
+  const ring = (c, col, w) => { g.beginPath(); g.arc(c.x, c.y, extR(c) + px(5), 0, 7); g.lineWidth = px(w); g.strokeStyle = col; g.stroke(); };
+  for (const c of M.comps) {
+    const ok = ui.tool === 'mesh' ? (!isLine(c)) : (c.type === (ui.tool === 'belt' ? 'pulley' : 'sprocket'));
+    if (ok && isTr(c) || (ui.tool === 'mesh' && (c.type === 'rod' || c.type === 'wheel'))) { g.beginPath(); g.arc(c.x, c.y, px(4), 0, 7); g.fillStyle = 'rgba(22,163,74,.35)'; g.fill(); }
+  }
+  const hc = ui.hoverComp ? compById(ui.hoverComp) : null; if (hc) ring(hc, COL[ui.tool], 2.5);
+  if (ui.first) ring(ui.first.c, COL[ui.tool], 3);
+  const L = ui.beltList.map(compById).filter(Boolean);
+  if (L.length) { g.beginPath(); L.forEach((c, i) => i ? g.lineTo(c.x, c.y) : g.moveTo(c.x, c.y)); if (ui.mouse) g.lineTo(ui.mouse[0], ui.mouse[1]); g.setLineDash([px(5), px(4)]); g.lineWidth = px(1.8); g.strokeStyle = COL[ui.tool]; g.stroke(); g.setLineDash([]); for (const c of L) ring(c, COL[ui.tool], 3); }
+  else if (ui.first && ui.mouse) { g.beginPath(); g.moveTo(ui.first.c.x, ui.first.c.y); g.lineTo(ui.mouse[0], ui.mouse[1]); g.setLineDash([px(5), px(4)]); g.lineWidth = px(1.5); g.strokeStyle = COL[ui.tool]; g.stroke(); g.setLineDash([]); }
+  g.restore();
+}
+/* ---- 属性面板 ---- */
+const sel2 = (label, key, val, opts) => fs(label, key, val, opts);
+function trInfoLine(t) { return `<div style="color:#6b7280;font-size:12px;line-height:1.6;margin:3px 0 3px 0">${t}</div>`; }
+function trProps(c) {
+  let h = '';
+  const tt = f('厚度', 't', rd(c.t), 'cm', 'step="0.5" min="0.2"');
+  switch (c.type) {
+    case 'gear': case 'bevel': case 'wormwheel':
+      h += f('模数 m', 'm', c.m, 'mm', 'step="1" min="1"') + f('齿数 z', 'z', c.z, '', 'step="1" min="6"') + tt;
+      h += trInfoLine(`分度圆半径 = m·z/2 = <b>${rd(c.m * c.z / 2)} mm</b> (${rd(trR(c))} cm)；齿顶圆半径 ${rd(trR(c) + addendum(c))} cm`);
+      if (c.type === 'bevel') h += trInfoLine('锥齿轮：90° 轴交角的 2D 简化——按齿数比传递转速，方向可在连接里设置。');
+      if (c.type === 'wormwheel') h += trInfoLine('蜗轮：与蜗杆组成 1:N 传动 (N=蜗轮齿数/蜗杆头数)。');
+      break;
+    case 'ring': h += f('模数 m', 'm', c.m, 'mm', 'step="1" min="1"') + f('齿数 z', 'z', c.z, '', 'step="1" min="12"') + f('轮缘宽度', 'rim', rd(c.rim), 'cm', 'step="1" min="2"') + tt + trInfoLine(`节圆半径 ${rd(trR(c))} cm；与小齿轮内啮合，同向转动，比 = z小/z内圈`); break;
+    case 'rack': h += f('模数 m', 'm', c.m, 'mm', 'step="1" min="1"') + f('齿数 z', 'z', c.z, '', 'step="1" min="2"') + f('本体高度', 'h', rd(c.h), 'cm', 'step="1" min="3"') + tt + trInfoLine(`长度 = z·π·m = <b>${rd(rackLen(c))} cm</b>；小齿轮转动时 v = r·ω。旋转手柄/角度设定导轨方向，未手动加滑动副时自动沿齿条轴向导向。`); break;
+    case 'worm': h += f('头数', 'starts', c.starts, '', 'step="1" min="1" max="4"') + f('半径', 'r', rd(c.r), 'cm', 'step="1" min="2"') + f('长度', 'Lw', rd(c.Lw), 'cm', 'step="5" min="10"') + f('轴向', 'axd', rd(c.axd), '°', 'step="15"') + trInfoLine('蜗杆绕自身轴线转动(2D 简化：用铰链装到固定点/电机上)，轴向角决定图示方向与啮合侧。'); break;
+    case 'pulley': h += f('半径 r', 'r', rd(c.r), 'cm', 'step="1" min="3"') + tt + trInfoLine('皮带比 = r主/r从。用「皮带」工具连接两个或更多皮带轮。'); break;
+    case 'sprocket': h += f('齿数 z', 'z', c.z, '', 'step="1" min="6"') + f('链节距 p', 'p', c.p, 'mm', 'step="1" min="5"') + tt + trInfoLine(`节圆半径 = p/(2·sin(π/z)) = ${rd(trR(c))} cm；链条比 = z主/z从`); break;
+    case 'cam':
+      h += fs('轮廓', 'kind', c.kind, [['ecc', '偏心圆'], ['harmonic', '简谐升程(对心尖底)'], ['uniform', '等速升程(对心尖底)']]);
+      if (c.kind === 'ecc') h += f('圆半径 R', 'R', rd(c.R), 'cm', 'step="1" min="5"') + f('偏心距 e', 'e', rd(c.e), 'cm', 'step="1" min="1"') + trInfoLine(`升程 = 2e = ${rd(2 * c.e)} cm`);
+      else h += f('基圆半径 Rb', 'Rb', rd(c.Rb), 'cm', 'step="1" min="5"') + f('升程 h', 'h', rd(c.h), 'cm', 'step="1" min="1"') + f('升角(推程)', 'rise', rd(c.rise), '°', 'step="10" min="10"') + f('远休止角', 'dwell', rd(c.dwell), '°', 'step="10" min="0"') + f('回程角', 'ret', rd(c.ret), '°', 'step="10" min="10"') + trInfoLine(`近休止角 = ${rd(360 - c.rise - c.dwell - c.ret)}°（升角+远休+回程 ≤ 360°）`);
+      h += tt; break;
+    case 'follower': h += f('杆长 L', 'L', rd(c.L), 'cm', 'step="5" min="20"') + f('杆宽', 'w', rd(c.w), 'cm', 'step="1" min="4"') + fs('端部', 'tip', c.tip, [['knife', '尖底'], ['roller', '滚子']]) + (c.tip === 'roller' ? f('滚子半径', 'rr', rd(c.rr), 'cm', 'step="1" min="2"') : '') + f('回位弹簧 k', 'k', c.k, 'N/m', 'step="100" min="0"') + f('弹簧预压', 'pre', c.pre, 'cm', 'step="1" min="0"') + tt + trInfoLine('从动件沿自身“向下”(局部 +y)方向在导轨上移动，端部顶在凸轮轮廓上；回位弹簧使其保持接触。偏置 = 轴线到凸轮中心的距离(0 即对心)。用「啮合/接触」工具连接凸轮。'); break;
+    case 'ratchet': h += f('齿数 z', 'z', c.z, '', 'step="1" min="6"') + f('半径', 'r', rd(c.r), 'cm', 'step="1" min="5"') + fs('允许转向', 'dir', c.dir, [[1, '顺时针'], [-1, '逆时针']]) + fc('棘爪', 'pawl', c.pawl, '啮合（可在运行中切换）') + f('棘爪位置角', 'pawlAng', rd(c.pawlAng), '°', 'step="15"') + tt + trInfoLine('保持棘爪只允许单向转动，反转最多退回一个齿距。用「啮合」工具从摆杆/转动件连到棘轮 = 驱动棘爪，往复摆动→单向步进。'); break;
+    case 'gpin': h += f('锁止弧半径', 'r', rd(c.r), 'cm', 'step="1" min="5"') + f('销半径(曲柄)', 'rp', rd(c.rp), 'cm', 'step="1" min="3"') + f('槽数(配套)', 'n', c.n, '', 'step="1" min="3" max="12"') + tt + trInfoLine('拨盘：与槽轮用「啮合」工具连接时，销半径按 a·sin(π/n) 自动设定。'); break;
+    case 'geneva': h += f('槽数 n', 'n', c.n, '', 'step="1" min="3" max="12"') + f('半径 R', 'R', rd(c.R), 'cm', 'step="1" min="10"') + fc('内槽轮(同向)', 'inner', c.inner, '默认外槽轮：反向间歇转动') + tt + trInfoLine('每个拨盘周期槽轮转过 360°/n，其余时间停歇(锁止弧)。简化运动学模型：槽轮转角由拨盘转角精确给出。'); break;
+    case 'flywheel': h += f('外半径', 'r', rd(c.r), 'cm', 'step="1" min="8"') + f('内半径', 'ri', rd(c.ri), 'cm', 'step="1" min="2"') + tt + trInfoLine(`转动惯量 J = ½m(R²+r²) = ${(trInertia(c, compMass(c))).toFixed(3)} kg·m²`); break;
+    case 'screw': h += f('导程 lead', 'lead', rd(c.lead), 'cm/转', 'step="1" min="0.5"') + fs('旋向', 'hand', c.hand, [[1, '右旋'], [-1, '左旋']]) + f('长度', 'Ls', rd(c.Ls), 'cm', 'step="10" min="20"') + f('半径', 'r', rd(c.r), 'cm', 'step="0.5" min="1"') + f('轴向', 'axd', rd(c.axd), '°', 'step="15"') + trInfoLine(`螺母线速度 v = lead·ω/2π = ${rd(c.lead / TAU)} cm/rad；丝杠用铰链装到固定点/电机上，用「啮合」工具连接螺母。`); break;
+    case 'nut': h += f('宽度', 'w', rd(c.w), 'cm', 'step="5" min="8"') + f('高度', 'h', rd(c.h), 'cm', 'step="2" min="8"') + tt; break;
+    case 'clutch': h += f('最大传递扭矩', 'maxT', c.maxT, 'N·m', 'step="10" min="0"') + fc('接合', 'engaged', c.engaged !== false, '运行中可随时切换') + f('效率 η', 'eff', c.eff, '', 'step="0.01" min="0.05" max="1"') + f('长度', 'L', rd(c.L), 'cm', 'step="10" min="40"') + trInfoLine('两端用「铰链」连到两根轴(齿轮/飞轮/皮带轮…的中心)。接合时转速 1:1 同向，超过扭矩上限则打滑。'); break;
+    case 'gearbox': h += f('减速比 N', 'ratio', c.ratio, ':1', 'step="1" min="1"') + fc('输出反向', 'rev', c.rev, '') + f('效率 η', 'eff', c.eff, '', 'step="0.01" min="0.05" max="1"') + f('长度', 'L', rd(c.L), 'cm', 'step="10" min="60"') + trInfoLine('端点 A = 输入轴，端点 B = 输出轴；输出转速 = 输入/N，输出扭矩 = N·η·输入扭矩。'); break;
+    case 'ujoint': h += f('轴间夹角 β', 'beta', rd(c.beta), '°', 'step="5" min="0" max="60"') + f('长度', 'L', rd(c.L), 'cm', 'step="10" min="40"') + trInfoLine('从动轴转角 θ2 = atan2(sinθ1, cosβ·cosθ1)：平均转速 1:1，但瞬时转速每转波动两次。'); break;
+  }
+  return h;
+}
+const TR_LIM = { m: [1, 40, 0], z: [6, 300, 1], n: [3, 12, 1], starts: [1, 4, 1], ri: [1, 1e4, 0], rim: [1, 1e3, 0], lead: [0.2, 1e3, 0], Ls: [10, 1e4, 0], Lw: [10, 1e4, 0], p: [5, 200, 0], Rb: [3, 1e3, 0], R: [3, 1e3, 0], e: [0.5, 1e3, 0], h: null, rise: [5, 340, 0], dwell: [0, 340, 0], ret: [5, 340, 0], rr: [1, 100, 0], k: [0, 1e6, 0], pre: [0, 100, 0], maxT: [0, 1e6, 0], ratio: [1, 1e4, 0], beta: [0, 60, 0], eff: [0.05, 1, 0], rp: [1, 1e3, 0], axd: [-1e9, 1e9, 0], pawlAng: [-1e9, 1e9, 0] };
+function trApplyProp(c, k, v) { // 返回 true 表示已处理
+  if (k === 'dir' || k === 'hand') { c[k] = parseFloat(v) >= 0 ? 1 : -1; return true; }
+  if (k === 'kind' || k === 'tip') { c[k] = v; return true; }
+  if (['pawl', 'inner', 'rev', 'engaged'].indexOf(k) >= 0) { c[k] = !!v; return true; }
+  if (k === 'h' && (c.type === 'cam')) { c.h = Math.max(1, v); return true; }
+  if (k === 'z' && c.type === 'rack') { c.z = Math.max(2, Math.round(v)); return true; }
+  if (k === 'z' && c.type === 'ring') { c.z = Math.max(12, Math.round(v)); return true; }
+  const lim = TR_LIM[k]; if (!lim) return false;
+  let x = Math.max(lim[0], Math.min(lim[1], v)); if (lim[2]) x = Math.round(x); c[k] = x;
+  if (k === 'ri' && c.type === 'flywheel') c.ri = Math.min(c.ri, c.r - 1);
+  if (k === 'rise' || k === 'dwell' || k === 'ret') { const o = k === 'ret' ? ['rise', 'dwell'] : k === 'dwell' ? ['rise', 'ret'] : ['dwell', 'ret']; if (c.rise + c.dwell + c.ret > 360) c[k] = Math.max(0, 360 - c[o[0]] - c[o[1]]); }
+  return true;
+}
+function trJointProps(j) {
+  const a = compById(j.a), b = compById(j.b); let h = '';
+  h += `<div class="title">${meshLabel(j)}　<span style="font-weight:400;color:#6b7280">${j.id}</span></div>`;
+  if (j.type === 'mesh') {
+    h += `<div class="row"><label>零件</label><span>${a ? a.name : '?'} ↔ ${b ? b.name : '?'}</span></div>`;
+    const nom = meshNominal(j, a, b);
+    if (nom != null) h += `<div class="row"><label>名义传动比</label><span>ω<sub>B</sub>/ω<sub>A</sub> = <b>${nom.toFixed(4)}</b></span></div>`;
+    if (j.kind === 'rack') h += `<div class="row"><label>名义线速度</label><span>v = r·ω = ${rd(trR(a))} cm × ω</span></div>`;
+    if (j.kind === 'screw') h += `<div class="row"><label>名义线速度</label><span>v = lead·ω/2π (导程 ${a.lead} cm)</span></div>`;
+    const gap = meshGap(j); h += `<div class="row"><label>中心距误差</label><span style="color:${gap > 1 ? '#dc2626' : '#16a34a'}">${rd(gap)} cm ${gap > 1 ? '(请调整位置使节圆相切)' : '✓'}</span></div>`;
+    if (!meshModuleOK(j)) h += trInfoLine('<span style="color:#dc2626">⚠ 两个零件模数不同，实际无法啮合（仍按齿数比计算）。</span>');
+    if (j.kind === 'bevel') h += fc('输出反向', 'rev', j.rev !== false, '锥齿轮对的转向（2D 简化）');
+    if (j.kind === 'worm') h += fc('反向', 'rev', !!j.rev, '蜗轮与蜗杆转向相反') + fc('自锁', 'lock', !!j.lock, '蜗轮不能反向驱动蜗杆（蜗杆静止时蜗轮锁死）');
+    if (j.kind === 'screw') h += fc('自锁', 'lock', !!j.lock, '螺母不能反向驱动丝杠');
+    if (j.kind === 'gear' || j.kind === 'ring' || j.kind === 'bevel' || j.kind === 'worm' || j.kind === 'rack' || j.kind === 'screw') h += f('效率 η', 'eff', j.eff == null ? 1 : j.eff, '', 'step="0.01" min="0.05" max="1"') + f('打滑扭矩上限', 'maxT', j.maxT || 0, 'N·m', 'step="10" min="0"');
+    if (j.kind === 'cam') h += trInfoLine('凸轮轮廓与从动件顶端保持单边接触（尖底/滚子），回位弹簧在从动件属性里设置。');
+    if (j.kind === 'geneva') h += trInfoLine('槽轮机构：槽轮转角由拨盘转角决定，每周期转动 360°/n 并停歇；装配相位已在建立连接时对齐。');
+    if (j.kind === 'ratchet') h += trInfoLine('驱动棘爪：A(摆杆)正向摆动时推动棘轮前进，反向摆动时空回；保持棘爪(棘轮自带)防止棘轮倒转。');
+  } else {
+    h += `<div class="row"><label>零件</label><span>${(j.ids || []).map(id => (compById(id) || { name: '?' }).name).join(' → ')}</span></div>`;
+    const cs = (j.ids || []).map(compById).filter(Boolean);
+    if (cs.length >= 2) {
+      const nom = j.type === 'chain' ? cs[0].z / cs[1].z : (j.crossed && cs.length === 2 ? -1 : 1) * trR(cs[0]) / trR(cs[1]);
+      h += `<div class="row"><label>首两轮比</label><span>ω<sub>2</sub>/ω<sub>1</sub> = <b>${nom.toFixed(4)}</b> (${j.type === 'chain' ? 'z1/z2' : 'r1/r2'})</span></div>`;
+    }
+    if (j.type === 'belt' && (j.ids || []).length === 2) h += fc('交叉皮带', 'crossed', !!j.crossed, '两轮反向转动');
+    if (j.type === 'belt') h += f('打滑拉力上限', 'slipF', j.slipF || 0, 'N', 'step="10" min="0"') + trInfoLine('皮带最大有效拉力(0=不打滑)；超过时皮带在主动轮上打滑。');
+    h += f('效率 η', 'eff', j.eff == null ? 1 : j.eff, '', 'step="0.01" min="0.05" max="1"');
+  }
+  h += `<button class="del" data-act="del">删除连接</button>`;
+  return h;
+}
+/* ---- 运行读数 ---- */
+const rpmOf = w => w * 30 / Math.PI;
+const f2n = (v, d) => { const s = (+v).toFixed(d == null ? 2 : d); return /^-0(\.0*)?$/.test(s) ? s.slice(1) : s; };
+function rowInfo(r) {
+  const d = r.data, A = r.A, B = r.B, o = { mode: d.mode };
+  if (d.mode === 'rr' || d.mode === 'var') {
+    const wa = A.w, wb = B.w; o.wa = wa; o.wb = wb; o.nom = d.nom; o.act = Math.abs(wa) > 1e-3 ? wb / wa : null;
+    if (d.mode === 'var') { const da = A.a - d.a0; o.cum = Math.abs(da) > 1e-3 ? (B.a - d.b0) / da : null; }
+    o.PA = r.tqA * wa; o.PB = r.tqB * wb; o.tA = r.tqA; o.tB = r.tqB;
+  } else if (d.mode === 'rl') {
+    const u = d.cB.type === 'rack' ? [Math.cos(B.a), Math.sin(B.a)] : d.u0, vb = B.vx * u[0] + B.vy * u[1], wa = A.w;
+    o.wa = wa; o.vb = vb; o.nom = d.nom; o.act = Math.abs(wa) > 1e-3 ? vb / wa : null; o.PA = r.tqA * wa; o.PB = r.fB * vb; o.tA = r.tqA; o.fB = r.fB;
+  }
+  if (o.PA != null) { o.Pin = -Math.min(o.PA, o.PB); o.Pout = Math.max(o.PA, o.PB); o.eta = o.Pin > 1e-6 ? o.Pout / o.Pin : null; }
+  return o;
+}
+function trRowText(r, short) {
+  if (r.data.mode === 'cam') return '';
+  if (r.data.mode === 'hold' || r.data.mode === 'drive') return '';
+  const o = rowInfo(r); if (o.act == null) return '';
+  if (r.data.mode === 'rl') return `v/ω 实际 ${(o.act * 100).toFixed(3)} / 名义 ${(o.nom * 100).toFixed(3)} cm/rad`;
+  if (r.data.clutch) return (r.slip ? '打滑' : '同步') + ` ${rpmOf(o.wa).toFixed(1)}→${rpmOf(o.wb).toFixed(1)} rpm`;
+  return `i 实际 ${o.act.toFixed(4)} / 名义 ${o.nom.toFixed(4)}`;
+}
+function trLinkText(j) {
+  const rs = sim.rowsOf[j.id]; if (!rs || !rs.length) return '';
+  const r = rs[0], d = r.data;
+  if (d.mode === 'cam') return `轮廓半径 ${(d.rho * 100).toFixed(2)} cm，接触力 ${r.fB.toFixed(1)} N`;
+  if (d.mode === 'drive' || d.mode === 'hold') { const w = sim.bodyOf[d.cB && d.cB.id]; return w ? `棘轮 ${rpmOf(w.w).toFixed(1)} rpm，转角 ${(w.a * 180 / Math.PI).toFixed(0)}°` : ''; }
+  const o = rowInfo(r); if (o.act == null) return '';
+  if (o.mode === 'rl') return `v=${(o.vb * 100).toFixed(2)} cm/s  (v/ω 实际 ${(o.act * 100).toFixed(3)}/名义 ${(o.nom * 100).toFixed(3)})`;
+  if (o.mode === 'var') return `ω比 瞬时 ${o.act.toFixed(3)}` + (o.cum != null ? ` 平均 ${o.cum.toFixed(3)}/名义 ${o.nom.toFixed(3)}` : '');
+  return `i = ${o.act.toFixed(4)} (名义 ${o.nom.toFixed(4)})`;
+}
+function rowLabel(r) {
+  const d = r.data;
+  if (d.mode === 'hold') return '保持棘爪'; if (d.mode === 'drive') return '驱动棘爪';
+  if (d.clutch) return d.clutch.name; const nm = c => c ? c.name : '地面';
+  return nm(d.cA) + ' → ' + nm(d.cB);
+}
+function trLinkReadout(j) {
+  const f2 = f2n; let h = '';
+  const rs = sim.rowsOf[j.id] || [];
+  h += `<b>${meshLabel(j)}</b>${j.auto ? '（自动啮合）' : ''}<br>`;
+  if (!rs.length) return h + '该连接未生效（零件需要先用铰链装到固定点/电机上）';
+  for (const r of rs) {
+    const o = rowInfo(r), d = r.data;
+    if (d.mode === 'cam') { h += `${rowLabel(r)}：轮廓半径 ${f2(r.data.rho * 100, 2)} cm，间隙 ${f2((r.data.gap || 0) * 100, 3)} cm，接触力 ${f2(r.fB)} N<br>`; continue; }
+    if (o.act == null && o.mode !== 'rl') { h += `${rowLabel(r)}：转速 ${f2(rpmOf(o.wa || 0), 1)} → ${f2(rpmOf(o.wb || 0), 1)} rpm<br>`; continue; }
+    h += `<b>${rowLabel(r)}</b><br>`;
+    if (o.mode === 'rl') {
+      h += `转速 ${f2(rpmOf(o.wa), 2)} rpm，线速度 v=<b>${f2(o.vb * 100, 3)}</b> cm/s<br>v/ω 实际 <b>${f2(o.act * 100, 4)}</b> / 名义 ${f2(o.nom * 100, 4)} cm/rad（偏差 ${f2((o.act / o.nom - 1) * 100, 3)}%）<br>`;
+      h += `轴转矩 ${f2(o.tA)} N·m，直线推力 ${f2(o.fB)} N<br>`;
+    } else {
+      h += `${f2(rpmOf(o.wa), 2)} → ${f2(rpmOf(o.wb), 2)} rpm<br>转速比 实际 <b>${f2(o.act, 4)}</b> / 名义 ${f2(o.nom, 4)}（偏差 ${f2((o.act / o.nom - 1) * 100, 3)}%）`;
+      if (o.cum != null) h += `；平均转角比 ${f2(o.cum, 4)}`; h += '<br>';
+      h += `转矩 A ${f2(o.tA)} / B ${f2(o.tB)} N·m<br>`;
+    }
+    h += `功率：输入 <b>${f2(o.Pin)}</b> W，输出 <b>${f2(o.Pout)}</b> W` + (o.eta != null ? `，效率 ${f2(o.eta * 100, 1)}%` : '') + (r.slip ? ' <span style="color:#dc2626">⚠打滑</span>' : '') + '<br>';
+  }
+  return h;
+}
+function trCompReadout(c, b) {
+  const f2 = f2n; let h = '<hr style="border:0;border-top:1px solid #e5e7eb;margin:4px 0"><b>传动数据</b><br>';
+  if (TR_LIN.indexOf(c.type) >= 0) {
+    const u = c.type === 'follower' ? [-Math.sin(b.a), Math.cos(b.a)] : c.type === 'nut' ? screwAxisOfNut(c) : [Math.cos(b.a), Math.sin(b.a)];
+    h += `沿导轨速度 v=<b>${f2(b.vx * u[0] + b.vy * u[1], 4)}</b> m/s<br>`;
+  } else h += `转速 <b>${f2(rpmOf(b.w), 2)}</b> rpm (ω=${f2(b.w, 3)} rad/s)<br>`;
+  let P = 0, tq = 0;
+  for (const r of sim.rows) {
+    if (r.B === b || r.A === b) {
+      const isB = r.B === b, t = isB ? r.tqB : r.tqA, w = b.w; const fl = isB && (r.data.mode === 'rl' || r.data.mode === 'cam') ? r.fB : 0;
+      const pw = isB && fl ? fl * (r.data.mode === 'rl' ? (b.vx * Math.cos(b.a) + b.vy * Math.sin(b.a)) * 0 + rowInfo(r).vb : 0) : t * w;
+      h += `· ${rowLabel(r)}：` + (fl ? `推力 ${f2(fl)} N` : `转矩 ${f2(t)} N·m`) + `，功率 ${f2(isB && r.data.mode === 'rl' ? rowInfo(r).PB : pw)} W<br>`;
+      tq += t; P += isB && r.data.mode === 'rl' ? rowInfo(r).PB : pw;
+    }
+  }
+  for (const J of Object.values(sim.jointOf)) if (J.motor && J.B === b) h += `· 电机驱动：转矩 ${f2(J.tAvg || 0)} N·m，功率 ${f2((J.tAvg || 0) * b.w)} W (输入)<br>`;
+  h += `经传动连接净输入功率 ${f2(P)} W（正=被驱动，负=向外输出）<br>`;
+  if (TR_ROT.indexOf(c.type) >= 0) h += `转动动能 ${f2(0.5 * b.I * b.w * b.w)} J (J=${f2(b.I, 4)} kg·m²)<br>`;
+  if (c.type === 'follower') { const r = sim.rows.find(x => x.data.mode === 'cam' && x.B === b); if (r) h += `轮廓半径 ${f2(r.data.rho * 100, 2)} cm，接触力 ${f2(r.fB)} N<br>`; }
+  return h;
+}
+function chainRatio(inId, outId) { // 从 inId 到 outId 的名义总传动比：沿 rr 行/焊接(同轴 1:1)做 BFS
+  const edges = {}; const add = (a, b, k) => { (edges[a] = edges[a] || []).push([b, k]); (edges[b] = edges[b] || []).push([a, 1 / k]); };
+  for (const r of sim.rows) if (r.data.mode === 'rr' && r.data.cA && r.data.cB) add(r.data.cA.id, r.data.cB.id, r.data.nom);
+  for (const j of M.joints) if (j.type === 'weld' && j.a && j.b) add(j.a, j.b, 1);
+  const q = [[inId, 1]], seen = { [inId]: 1 };
+  while (q.length) { const [id, k] = q.shift(); if (id === outId) return k; for (const [n, kk] of edges[id] || []) if (!(n in seen)) { seen[n] = 1; q.push([n, k * kk]); } }
+  return null;
+}
+function trSummary() {
+  const f2 = f2n; let h = '';
+  if (M.io) {
+    const bi = sim.bodyOf[M.io.inId], bo2 = sim.bodyOf[M.io.outId], ci = compById(M.io.inId), co = compById(M.io.outId);
+    if (bi && bo2) {
+      const nom = chainRatio(M.io.inId, M.io.outId), act = Math.abs(bi.w) > 1e-3 ? bo2.w / bi.w : null;
+      h += `<b>传动链</b>：${ci.name} → ${co.name}<br>输入 <b>${f2(rpmOf(bi.w), 2)}</b> rpm　输出 <b>${f2(rpmOf(bo2.w), 2)}</b> rpm<br>`;
+      if (nom != null) h += `总传动比 实际 <b>${act == null ? '-' : f2(act, 4)}</b> / 名义 ${f2(nom, 4)}` + (act != null ? `（减速比 ${f2(1 / Math.abs(act), 3)}:1）` : '') + '<br>';
+      for (const J of Object.values(sim.jointOf)) if (J.motor && J.B === bi) h += `电机转矩 ${f2(J.tAvg || 0)} N·m，输入功率 ${f2((J.tAvg || 0) * bi.w)} W<br>`;
+      h += `输出转矩 ${f2(Math.abs(sim.rows.filter(r => r.B === bo2 || r.A === bo2).map(r => (r.B === bo2 ? r.tqB : r.tqA))[0] || 0))} N·m<br>`;
+    }
+  }
+  const links = M.joints.filter(isTrJoint).concat(sim.autoJ);
+  if (links.length) { h += '<b>传动连接</b><br>'; for (const j of links) { const t = trLinkText(j); const cs = j.type === 'mesh' ? [compById(j.a), compById(j.b)] : (j.ids || []).map(compById); h += `· ${cs.map(c => c ? c.name : '?').join('-')}：${t || '—'}<br>`; } }
+  for (const c of M.comps) if (isConn(c) && sim.rowsOf[c.id]) { h += `· ${c.name}：${trRowText(sim.rowsOf[c.id][0]) || '—'}<br>`; }
+  return h;
+}
+/* ---- BOM 补充 ---- */
+function trJointNote(j) {
+  const a = compById(j.a), b = compById(j.b);
+  if (j.type === 'mesh') { const nom = meshNominal(j, a, b); return `${meshLabel(j)}` + (nom != null ? `; 名义转速比 ${nom.toFixed(4)}` : '') + `; 效率 ${j.eff == null ? 1 : j.eff}` + (j.maxT > 0 ? `; 扭矩上限 ${j.maxT} N·m` : '') + (j.lock ? '; 自锁' : ''); }
+  const cs = (j.ids || []).map(compById).filter(Boolean);
+  const nom = cs.length >= 2 ? (j.type === 'chain' ? cs[0].z / cs[1].z : (j.crossed && cs.length === 2 ? -1 : 1) * trR(cs[0]) / trR(cs[1])) : 0;
+  return `${meshLabel(j)}; 轮: ${cs.map(c => c.name).join('→')}; 首两轮比 ${nom.toFixed(4)}` + (j.slipF > 0 ? `; 打滑拉力 ${j.slipF} N` : '') + `; 效率 ${j.eff == null ? 1 : j.eff}`;
+}
+/* ===================== 编辑模式拖拽：约束求解器驱动 =====================
+ * 编辑模式没有重力、没有自由仿真。拖动与其他零件“有连接”的零件时，临时建立一个无重力的求解世界
+ * （等质量、强阻尼 ⇒ 准静态），被拖零件通过刚性鼠标弹簧跟随指针，其余零件按铰链/滑动副/焊接/齿轮/带/链
+ * 约束被带动；松手后再做零速度的位置松弛，使所有连接回到严格闭合的位姿。 */
+const dragS = { on: false, world: null, comp: null, grab: null };
+// 该零件是否与“真实刚体连接”相连（弹簧/联轴器等两端件、传动连接不算）
+function needsSolve(c) {
+  if (!c || isLine(c)) return false;
+  return M.joints.some(j => !isTrJoint(j) && (j.a === c.id || j.b === c.id) && !isLine(compById(j.a)) && !isLine(compById(j.b)));
+}
+// 旋转手柄：只有当转动会破坏连接(焊接/滑动副，或铰点不在零件中心)时才走求解器；中心铰点直接转(保留 15° 吸附)
+function rotNeedsSolve(c) {
+  return M.joints.some(j => { if (isTrJoint(j) || (j.a !== c.id && j.b !== c.id)) return false; const o = compById(j.a === c.id ? j.b : j.a); if (isLine(o)) return false;
+    const p = j.a === c.id ? j.pa : j.pb; return j.type !== 'pin' || Math.hypot(p[0], p[1]) > 0.5; });
+}
+function jointGapEdit(j) { // 铰链/焊接：两锚点距离；滑动副：垂直轨道方向的偏差(沿轨道方向允许滑动)
+  if (isTrJoint(j)) return 0;
+  const a = jointEndWorld(j, 'a'), b = jointEndWorld(j, 'b');
+  if (j.type === 'slide') { const ca = compById(j.a); const ang = (ca ? ca.a : 0) + (j.axis || 0); return Math.abs(-(b[0] - a[0]) * Math.sin(ang) + (b[1] - a[1]) * Math.cos(ang)); }
+  return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
+function maxJointGap() { let m = 0; for (const j of M.joints) { const ca = compById(j.a), cb = compById(j.b); if (isLine(ca) || isLine(cb)) continue; m = Math.max(m, jointGapEdit(j)); } return m; }
+function dragBegin(c, wp) { // wp: 抓取点(世界, cm)
+  if (sim.mode !== 'edit') return false;
+  sim.dragMode = true; sim.dragId = c.id;
+  try { buildWorld(); } finally { sim.dragMode = false; sim.dragId = null; }
+  const w = sim.world, b = sim.bodyOf[c.id]; if (!b) { sim.world = null; return false; }
+  w.g = 0; const lc = toLocal(c, wp[0], wp[1]);
+  dragS.on = true; dragS.world = w; dragS.comp = c;
+  dragS.grab = { body: b, local: [lc[0] / S, lc[1] / S], tx: wp[0] / S, ty: wp[1] / S, w0: 45, zeta: 0.9, lim: 300 };
+  w.grab = dragS.grab; return true;
+}
+function dragTarget(wp) { if (dragS.on) { dragS.grab.tx = wp[0] / S; dragS.grab.ty = wp[1] / S; } }
+function dragWrite() {
+  for (const c of M.comps) {
+    if (isLine(c)) continue; const b = sim.bodyOf[c.id]; if (!b) continue;
+    if (b.static && c.id !== (dragS.comp && dragS.comp.id)) continue;
+    if (isFinite(b.x) && isFinite(b.y) && isFinite(b.a)) { c.x = b.x * S; c.y = b.y * S; c.a = b.a; }
+  }
+  syncSprings();
+}
+function dragStep(n) {
+  if (!dragS.on) return; const w = dragS.world; w.grab = dragS.grab;
+  for (let i = 0; i < (n || 8); i++) w.step();
+  w.harvest(); dragWrite();
+}
+function dragEnd() {
+  if (!dragS.on) return; const w = dragS.world; w.grab = null;
+  // 零速度位置松弛：只保留约束修正速度，直到所有连接闭合
+  for (let i = 0; i < 400; i++) {
+    for (const b of w.bodies) { b.vx = b.vy = b.w = 0; }
+    w.step();
+    if (i % 20 === 19) { dragWrite(); if (maxJointGap() < 0.002) break; }
+  }
+  dragWrite();
+  dragS.on = false; dragS.world = null; dragS.comp = null; dragS.grab = null;
+  sim.world = null; sim.bodyOf = {}; sim.jointOf = {}; sim.springOf = {}; sim.rows = []; sim.rowsOf = {};
+}
 /* 对外测试接口 */
 window.app = {
   get M() { return M; }, sim, view, ui, sel_, PRESETS,
   newComp, createJointAPI(type, a, b, wp) { const A = compById(a), B = b ? compById(b) : null; const j = jn(type, A, B, wp); syncSprings(); return j; },
   startRun, pauseRun, resetRun, simulate, loadPreset, undo, redo, modelJSON, bomCSV, loadFromObject, select, resetModel, fitView,
-  s2w, w2s, wpt, pts, saveFile, exportBOM, snapJSON, compById, undoStack, redoStack, syncSprings
+  s2w, w2s, wpt, pts, saveFile, exportBOM, snapJSON, compById, undoStack, redoStack, syncSprings,
+  dragBegin, dragTarget, dragStep, dragEnd, setInitial, setInitFromRun, captureInit, maxJointGap, jointGapEdit, needsSolve, dragS, createMesh, createBelt, meshLabel, trLinkText, rowInfo, chainRatio, trSummary, jointGap, autoMeshList, TYPES, view, ui, setTool
 };
 try { init(); undoStack.length = 0; redoStack.length = 0; updateUndoUI(); } catch (e) { console.error(e); document.body.insertAdjacentHTML('afterbegin', '<pre style="color:red">' + e.stack + '</pre>'); }
 </script>
