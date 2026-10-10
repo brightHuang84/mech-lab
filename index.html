@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>机械结构虚拟试验台</title>
+<style>
+:root{--bg:#f2f4f8;--panel:#fff;--ink:#1d2433;--mute:#667085;--line:#d9dee8;--acc:#2563eb;--acc2:#0ea5a4;--bad:#dc2626;--warn:#d97706;--ok:#16a34a;}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "Noto Sans CJK SC","Noto Sans SC","Microsoft YaHei","PingFang SC","Source Han Sans SC",system-ui,sans-serif}
+header{background:#101a2e;color:#fff;padding:10px 18px;display:flex;align-items:baseline;gap:14px}
+header h1{margin:0;font-size:20px;letter-spacing:1px}
+header span{color:#9fb0cf;font-size:12px}
+.app{display:grid;grid-template-columns:340px minmax(0,1fr);gap:12px;padding:12px;align-items:start}
+aside{position:sticky;top:8px;max-height:calc(100vh - 16px);overflow:auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.card h2{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+.row{display:grid;grid-template-columns:96px 1fr 78px;gap:6px;align-items:center;margin:5px 0}
+.row label{color:var(--ink);font-size:13px}
+.row input[type=range]{width:100%;margin:0}
+input[type=number],select,input[type=text]{width:100%;padding:3px 5px;border:1px solid var(--line);border-radius:5px;font:inherit;background:#fff}
+input.bad{border-color:var(--bad);background:#fee2e2}
+.unit{color:var(--mute);font-size:11px}
+button{font:inherit;padding:5px 10px;border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer}
+button:hover{border-color:var(--acc);color:var(--acc)}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.pri:hover{filter:brightness(1.1);color:#fff}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.status{padding:6px 10px;border-radius:6px;font-size:13px;margin:4px 0}
+.status.ok{background:#dcfce7;color:#14532d}.status.warn{background:#fef3c7;color:#78350f}.status.bad{background:#fee2e2;color:#7f1d1d}
+canvas{display:block;width:100%;background:#fff;border:1px solid var(--line);border-radius:8px}
+#anim{height:380px}
+.plots{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.plots canvas{height:230px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px}
+.tile{background:#f7f9fc;border:1px solid var(--line);border-radius:7px;padding:5px 8px}
+.tile b{display:block;font-size:11px;color:var(--mute);font-weight:500}
+.tile span{font-variant-numeric:tabular-nums;font-size:15px;font-weight:600}
+.tile.sum{background:#eef5ff}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:10px}
+.tabs button{border:none;border-bottom:3px solid transparent;border-radius:0;background:none;padding:8px 14px;font-weight:600}
+.tabs button.on{border-bottom-color:var(--acc);color:var(--acc)}
+.tab{display:none}.tab.on{display:block}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border:1px solid var(--line);padding:3px 7px;text-align:right}
+th{background:#f1f4f9}
+td.l,th.l{text-align:left}
+tr.best td{background:#fef9c3;font-weight:700}
+.scroll{max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+.flex>div{min-width:110px}
+.flex label{display:block;font-size:12px;color:var(--mute)}
+.sweepcharts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
+.sweepcharts canvas{height:200px}
+.note{color:var(--mute);font-size:12px}
+details summary{cursor:pointer;font-weight:600;margin-bottom:6px}
+#svgPrev{border:1px solid var(--line);border-radius:8px;background:#fff;margin-top:8px;overflow:auto}
+#svgPrev svg{width:100%;height:auto;display:block}
+@media(max-width:1000px){.app{grid-template-columns:1fr}aside{position:static;max-height:none}.plots,.sweepcharts{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><h1>机械结构虚拟试验台</h1><span>2D 曲柄滑块机构仿真 · 运动学 / 动力学 / 参数扫描 / 导出 / 标定 · v0.1</span></header>
+<div class="app">
+<aside>
+  <div class="card">
+    <h2>机构参数</h2>
+    <div id="paramRows"></div>
+    <div class="row"><label>载荷类型</label>
+      <select id="loadMode" style="grid-column:2/4">
+        <option value="const">恒定方向力(沿 −x,如气压/切削反力)</option>
+        <option value="oppose">始终阻碍运动(阻力)</option>
+      </select></div>
+    <div class="row"><label>重力</label><label style="grid-column:2/4"><input type="checkbox" id="gravity" checked> 启用(导轨水平,g=9.80665 m/s²)</label></div>
+    <details><summary>结构尺寸(用于绘图 / BOM)</summary><div id="dimRows"></div></details>
+    <div id="status"></div>
+  </div>
+  <div class="card">
+    <h2>仿真控制</h2>
+    <div class="btns">
+      <button id="bPlay" class="pri">⏸ 暂停</button>
+      <button id="bBack">⏮ 步退</button>
+      <button id="bStep">⏭ 单步</button>
+      <button id="bReset">↺ 复位</button>
+    </div>
+    <div class="row"><label>播放速度</label><input type="range" id="speed" min="-2" max="0.5" step="0.05" value="0"><span id="speedV" class="unit">1.00×</span></div>
+    <div class="row"><label>单步角度</label><input type="number" id="stepDeg" value="5" min="0.1" max="90" step="0.5"><span class="unit">°</span></div>
+    <div class="row"><label>曲柄角 θ</label><input type="range" id="angSlider" min="0" max="360" step="0.1" value="0"><span id="angV" class="unit">0°</span></div>
+    <div class="row"><label>曲线横轴</label><select id="xmode" style="grid-column:2/4"><option value="angle">曲柄角 θ (°)</option><option value="time">时间 t (ms)</option></select></div>
+    <div class="note">空格键:播放/暂停。曲柄逆时针为正。</div>
+  </div>
+  <div class="card note">
+    <b>模型假设</b><br>杆件与曲柄质量/惯量忽略(两力杆),曲柄匀速转动,正置曲柄滑块(无偏距),导轨水平,库仑摩擦 F<sub>f</sub>=μ|N|(速度符号光滑化)。
+  </div>
+</aside>
+<main>
+  <div class="card"><canvas id="anim"></canvas></div>
+  <div class="card"><h2>实时数据</h2><div class="tiles" id="tilesLive"></div><h2 style="margin-top:10px">整周期统计</h2><div class="tiles" id="tilesSum"></div></div>
+  <div class="card"><h2>实时曲线(一个周期,游标为当前位置)</h2>
+    <div class="plots"><canvas id="pX"></canvas><canvas id="pV"></canvas><canvas id="pA"></canvas><canvas id="pT"></canvas></div></div>
+  <div class="card">
+    <div class="tabs"><button data-tab="sweep" class="on">参数扫描</button><button data-tab="export">导出 / BOM</button><button data-tab="calib">标定对比(导入实测 CSV)</button></div>
+
+    <div class="tab on" id="tab-sweep">
+      <div class="flex">
+        <div><label>扫描参数</label><select id="swParam"></select></div>
+        <div><label>起始值</label><input type="number" id="swFrom" step="any"></div>
+        <div><label>终止值</label><input type="number" id="swTo" step="any"></div>
+        <div><label>点数</label><input type="number" id="swN" value="40" min="3" max="400"></div>
+        <div><button id="swRun" class="pri">运行扫描</button></div>
+      </div>
+      <div class="flex" style="margin-top:8px">
+        <div style="min-width:240px"><label>最优判据</label><select id="swCrit">
+          <option value="minAmax">峰值加速度最小</option>
+          <option value="minTau">峰值扭矩最小</option>
+          <option value="minTauRms">RMS 扭矩最小</option>
+          <option value="minTauPerStroke">峰值扭矩 / 行程 最小</option>
+          <option value="maxStroke">行程最大</option></select></div>
+        <div><label>约束:行程 ≥ (mm)</label><input type="number" id="swMinStroke" value="0" min="0" step="any"></div>
+        <div><button id="swBest">高亮最优</button></div>
+        <div><button id="swApply">应用最优值到设计</button></div>
+      </div>
+      <div id="swMsg" class="note" style="margin:6px 0"></div>
+      <div class="sweepcharts"><canvas id="sw1"></canvas><canvas id="sw2"></canvas><canvas id="sw3"></canvas></div>
+      <div class="scroll" style="margin-top:8px"><table id="swTable"></table></div>
+    </div>
+
+    <div class="tab" id="tab-export">
+      <div class="btns">
+        <button id="exJson" class="pri">下载设计 JSON</button>
+        <button id="exLoad">载入设计 JSON…</button><input type="file" id="exLoadFile" accept=".json,application/json" hidden>
+        <button id="exCsv" class="pri">下载仿真数据 CSV</button>
+        <button id="exSvg" class="pri">下载 SVG 尺寸图</button>
+        <button id="exBomCsv">下载 BOM CSV</button>
+      </div>
+      <div class="flex">
+        <div><label>SVG 曲柄角 θ (°)</label><input type="number" id="svgAng" value="45" step="1"></div>
+        <div><button id="svgCur">取当前角</button></div>
+        <div><label>CSV 角度步长 (°)</label><input type="number" id="csvStep" value="1" min="0.1" max="30" step="0.1"></div>
+      </div>
+      <h2 style="margin-top:12px">零件清单 (BOM)</h2>
+      <div class="scroll" style="max-height:none"><table id="bom"></table></div>
+      <div class="note">质量按钢材 7850 kg/m³ 估算(忽略销孔);滑块质量取仿真参数。</div>
+      <h2 style="margin-top:12px">SVG 尺寸图预览</h2>
+      <div id="svgPrev"></div>
+    </div>
+
+    <div class="tab" id="tab-calib">
+      <div class="btns">
+        <button id="caLoad" class="pri">导入实测 CSV…</button><input type="file" id="caFile" accept=".csv,.txt,text/csv,text/plain" hidden>
+        <button id="caDemo">生成示例数据</button>
+        <button id="caTpl">下载示例 CSV</button>
+        <button id="caAuto">自动对齐(相位 + 偏置)</button>
+        <button id="caClear">清除</button>
+      </div>
+      <div class="flex">
+        <div><label>时间单位</label><select id="caTU"><option value="1">s</option><option value="0.001">ms</option></select></div>
+        <div><label>位置单位</label><select id="caPU"><option value="1">mm</option><option value="1000">m</option></select></div>
+        <div><label>相位偏移 θ₀ (°)</label><input type="number" id="caPhase" value="0" step="0.5"></div>
+        <div><label>位置偏置 (mm)</label><input type="number" id="caOff" value="0" step="0.1"></div>
+        <div><label>&nbsp;</label><label><input type="checkbox" id="caAutoOff"> 自动偏置</label></div>
+      </div>
+      <div class="note" style="margin:6px 0">CSV 两列:时间, 滑块位置(位置为 x = 滑块销到曲柄轴心的水平距离,与仿真 x 同定义);可含表头,分隔符 逗号 / 分号 / Tab / 空格。仿真曲线为 x(θ₀ + ω·t),随转速周期延拓。</div>
+      <div class="tiles" id="caTiles"></div>
+      <div class="plots" style="margin-top:8px;grid-template-columns:1fr"><canvas id="caPlot" style="height:260px"></canvas><canvas id="caRes" style="height:150px"></canvas></div>
+    </div>
+  </div>
+</main>
+</div>
+
+<script>
+"use strict";
+// ==CORE-BEGIN==
+/* 物理核心(纯函数,可在 node 中单独测试)。长度 mm,质量 kg,力 N,角 rad。
+   曲柄角 θ 从导轨轴线(+x)逆时针量取,曲柄铰 O 在原点,滑块销在 (x,0)。 */
+const G0 = 9.80665;
+function kin(r, l, th){
+  const s = Math.sin(th), c = Math.cos(th);
+  const S = Math.sqrt(l*l - r*r*s*s);                       // l·cosφ
+  const x = r*c + S;                                        // 精确位置
+  const dx = -r*s - r*r*s*c/S;                              // dx/dθ
+  const d2x = -r*c - r*r*(c*c - s*s)/S - Math.pow(r*r*s*c, 2)/(S*S*S); // d²x/dθ²
+  const sinphi = r*s/l, cosphi = S/l;
+  return {x, dx, d2x, S, sinphi, cosphi, phi: Math.asin(sinphi)};
+}
+function dyn(p, th){
+  const k = kin(p.r, p.l, th), rm = p.r/1000;
+  const w = p.rpm*2*Math.PI/60;
+  const v = w*k.dx/1000, a = w*w*k.d2x/1000;                 // m/s, m/s²
+  const veps = 1e-3*Math.abs(w)*rm + 1e-9;
+  const s = Math.tanh(v/veps);                              // 光滑 sign(v)
+  const mg = p.g ? p.m*G0 : 0;
+  const Fx = p.loadMode === 'oppose' ? -p.F*s : -p.F;        // 载荷力(x 向)
+  const A = -p.m*a + Fx;
+  const cp = k.cosphi, sp = k.sinphi, mu = p.mu;
+  const g1 = (cp - mu*s*sp), den1 = Math.abs(g1) < 1e-9 ? 1e-9 : g1;
+  let T = (A - mu*s*mg)/den1, N = mg - T*sp;                 // 杆拉力 T(拉为正),导轨正压力 N
+  if (N < 0){
+    const g2 = (cp + mu*s*sp), den2 = Math.abs(g2) < 1e-9 ? 1e-9 : g2;
+    const T2 = (A + mu*s*mg)/den2, N2 = mg - T2*sp;
+    if (N2 <= 0){ T = T2; N = N2; }
+  }
+  const Ff = -mu*s*Math.abs(N);
+  const tau = T*rm*Math.sin(th + k.phi);                     // 驱动力矩 N·m(逆时针为正)
+  return {x:k.x, v, a, phi:k.phi, T, N, Ff, Fx, tau, w,
+          Ox:-T*cp, Oy:T*sp,                                  // 机架对曲柄轴 O 的反力(= T·u)
+          P: tau*w};                                         // 驱动功率 W
+}
+function computeCurves(p, n){
+  const o = {th:[],t:[],x:[],v:[],a:[],T:[],N:[],tau:[],phi:[],Ff:[],Ox:[],Oy:[],Fx:[]};
+  const w = p.rpm*2*Math.PI/60;
+  for (let i = 0; i <= n; i++){
+    const th = 2*Math.PI*i/n, d = dyn(p, th);
+    o.th.push(th); o.t.push(w > 0 ? th/w : 0);
+    o.x.push(d.x); o.v.push(d.v); o.a.push(d.a); o.T.push(d.T); o.N.push(d.N);
+    o.tau.push(d.tau); o.phi.push(d.phi); o.Ff.push(d.Ff); o.Ox.push(d.Ox); o.Oy.push(d.Oy); o.Fx.push(d.Fx);
+  }
+  return o;
+}
+function statsOf(c){
+  const mx = a => Math.max(...a), mn = a => Math.min(...a);
+  const n = c.x.length - 1;               // 末点与首点重复,均值/RMS 用前 n 点
+  let s = 0, s2 = 0, sa = 0;
+  for (let i = 0; i < n; i++){ s += c.tau[i]; s2 += c.tau[i]*c.tau[i]; sa += Math.abs(c.tau[i]); }
+  const absmax = a => Math.max(mx(a), -mn(a));
+  return {xmax:mx(c.x), xmin:mn(c.x), stroke:mx(c.x)-mn(c.x), vmax:absmax(c.v), amax:absmax(c.a),
+          vpos:mx(c.v), vneg:mn(c.v), apos:mx(c.a), aneg:mn(c.a),
+          taumax:mx(c.tau), taumin:mn(c.tau), taupeak:absmax(c.tau), taumean:s/n, taurms:Math.sqrt(s2/n),
+          Tpeak:absmax(c.T), Npeak:absmax(c.N), phimax:absmax(c.phi), Opeak:Math.max(...c.Ox.map((v,i)=>Math.hypot(v,c.Oy[i])))};
+}
+function validate(p){
+  if (!(p.r > 0) || !(p.l > 0)) return {ok:false, level:'bad', msg:'r 与 l 必须为正数'};
+  if (!(p.l > p.r)) return {ok:false, level:'bad', msg:'无效:连杆长 l 必须大于曲柄长 r (l > r),否则机构无法整周转动(卡死)'};
+  if (p.l/p.r < 1.5) return {ok:true, level:'warn', msg:'警告:l/r < 1.5,连杆摆角过大(最大 '+(Math.asin(p.r/p.l)*180/Math.PI).toFixed(1)+'°),传动角差、二次惯性力大;建议 l/r ≥ 3'};
+  if (p.l/p.r < 3) return {ok:true, level:'warn', msg:'提示:l/r < 3,连杆比偏小(最大摆角 '+(Math.asin(p.r/p.l)*180/Math.PI).toFixed(1)+'°)'};
+  return {ok:true, level:'ok', msg:'尺寸有效:l > r,l/r = '+(p.l/p.r).toFixed(2)};
+}
+// ==CORE-END==
+
+/* ================= 应用部分 ================= */
+const DEG = Math.PI/180;
+const $ = id => document.getElementById(id);
+const P = {r:60, l:180, rpm:60, m:2, F:100, mu:0.1, g:true, loadMode:'const',
+           bw:20, bt:8, pinD:10, sliderL:60, sliderH:36};
+const PARAMS = [
+  {id:'r',  label:'曲柄长 r',   unit:'mm',  min:5,  max:200, step:1},
+  {id:'l',  label:'连杆长 l',   unit:'mm',  min:10, max:600, step:1},
+  {id:'rpm',label:'曲柄转速',   unit:'rpm', min:1,  max:3000, step:1},
+  {id:'m',  label:'滑块质量',   unit:'kg',  min:0.01, max:50, step:0.01},
+  {id:'F',  label:'滑块载荷力', unit:'N',   min:0,  max:2000, step:1},
+  {id:'mu', label:'摩擦系数 μ', unit:'',    min:0,  max:1, step:0.01},
+];
+const DIMS = [
+  {id:'bw',label:'杆宽 b',unit:'mm',min:2,max:100,step:1},
+  {id:'bt',label:'杆厚 t',unit:'mm',min:1,max:50,step:1},
+  {id:'pinD',label:'销轴直径 d',unit:'mm',min:2,max:50,step:1},
+  {id:'sliderL',label:'滑块长',unit:'mm',min:10,max:200,step:1},
+  {id:'sliderH',label:'滑块高',unit:'mm',min:10,max:200,step:1},
+];
+const SWEEP_PARAMS = PARAMS.map(p => ({id:p.id, label:p.label, unit:p.unit}));
+const PUNIT = Object.fromEntries(PARAMS.map(p => [p.id, p.unit]));
+const PLABEL = Object.fromEntries(PARAMS.map(p => [p.id, p.label]));
+
+let theta = 0, running = true, speed = 1, valid = true;
+let curves = null, stats = null;
+let sweep = null;       // {param, vals, res[], best}
+let calib = null;       // {t:[], x:[]} (s, mm)
+const ctrl = {};        // id -> {range, num}
+
+const f = (v, d) => {
+  if (v === undefined || v === null || !isFinite(v)) return '—';
+  if (d === undefined){ const a = Math.abs(v); d = a >= 1000 ? 0 : a >= 100 ? 1 : a >= 10 ? 2 : 3; }
+  return v.toFixed(d);
+};
+const wrap = a => { a %= 2*Math.PI; return a < 0 ? a + 2*Math.PI : a; };
+const omega = () => P.rpm*2*Math.PI/60;
+
+/* ---- 参数面板 ---- */
+function buildParamRows(list, host){
+  for (const d of list){
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<label>${d.label}</label><input type="range" min="${d.min}" max="${d.max}" step="${d.step}"><div style="display:flex;align-items:center;gap:3px"><input type="number" step="any" min="0"><span class="unit">${d.unit}</span></div>`;
+    host.appendChild(row);
+    const range = row.querySelector('input[type=range]'), num = row.querySelector('input[type=number]');
+    ctrl[d.id] = {range, num};
+    range.value = P[d.id]; num.value = P[d.id];
+    range.addEventListener('input', () => setParam(d.id, parseFloat(range.value), 'range'));
+    num.addEventListener('input', () => { const v = parseFloat(num.value); if (isFinite(v)) setParam(d.id, v, 'num'); });
+  }
+}
+function setParam(id, v, from){
+  P[id] = v;
+  const c = ctrl[id];
+  if (c){ if (from !== 'num') c.num.value = +v.toFixed(4); if (from !== 'range') c.range.value = v; }
+  recompute();
+}
+function syncAllInputs(){
+  for (const id in ctrl){ ctrl[id].num.value = +(+P[id]).toFixed(4); ctrl[id].range.value = P[id]; }
+  $('loadMode').value = P.loadMode; $('gravity').checked = !!P.g;
+  recompute();
+}
+
+function recompute(){
+  const v = validate(P);
+  valid = v.ok && P.rpm > 0 && P.m >= 0;
+  const st = $('status');
+  st.className = 'status ' + (v.ok && P.rpm > 0 ? v.level : 'bad');
+  st.textContent = P.rpm > 0 ? v.msg : '转速必须大于 0';
+  ctrl.r.num.classList.toggle('bad', !v.ok); ctrl.l.num.classList.toggle('bad', !v.ok);
+  if (valid){
+    curves = computeCurves(P, 720); stats = statsOf(curves);
+    $('svgAng').title = '';
+  } else { curves = null; stats = null; }
+  updateBOM(); updateCalib();
+  if (!valid) running = false, $('bPlay').textContent = '▶ 播放';
+}
+
+/* ---- 画布工具 ---- */
+function prep(cv){
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(10, cv.clientWidth), h = Math.max(10, cv.clientHeight);
+  if (cv.width !== Math.round(w*dpr) || cv.height !== Math.round(h*dpr)){ cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr); }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  return {ctx, w, h};
+}
+const FONT = '"Noto Sans CJK SC","Noto Sans SC","Microsoft YaHei","PingFang SC",sans-serif';
+function niceTicks(lo, hi, n){
+  if (!(hi > lo)){ hi = lo + 1; }
+  const raw = (hi - lo)/n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const nrm = raw/mag, step = (nrm < 1.5 ? 1 : nrm < 3 ? 2 : nrm < 7 ? 5 : 10)*mag;
+  const t = []; for (let v = Math.ceil(lo/step - 1e-9)*step; v <= hi + step*1e-9; v += step) t.push(Math.abs(v) < step*1e-9 ? 0 : v);
+  return {ticks:t, step};
+}
+const tickFmt = (v, step) => { const d = Math.max(0, -Math.floor(Math.log10(step) + 1e-9)); return v.toFixed(Math.min(d, 6)); };
+
+/* 通用折线图 */
+function drawChart(cv, o){
+  const {ctx, w, h} = prep(cv);
+  const L = 58, R = 12, Tm = 24, B = 34, pw = w - L - R, ph = h - Tm - B;
+  ctx.font = `12px ${FONT}`;
+  ctx.fillStyle = '#1d2433'; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.font = `600 13px ${FONT}`; ctx.fillText(o.title, L, 16);
+  ctx.font = `11px ${FONT}`;
+  // 范围
+  let ymin = Infinity, ymax = -Infinity;
+  const eat = arr => { for (const v of arr) if (isFinite(v)){ if (v < ymin) ymin = v; if (v > ymax) ymax = v; } };
+  (o.series || []).forEach(s => eat(s.y)); (o.points || []).forEach(s => eat(s.y));
+  if (!isFinite(ymin)){ ctx.fillStyle = '#667085'; ctx.textAlign = 'center'; ctx.fillText(o.empty || '无数据', w/2, h/2); return; }
+  if (o.zero){ ymin = Math.min(ymin, 0); ymax = Math.max(ymax, 0); }
+  if (ymax - ymin < 1e-9*Math.max(1, Math.abs(ymax), Math.abs(ymin))){ const c = (ymax + ymin)/2, hw = Math.max(1, Math.abs(c))*0.05; ymin = c - hw; ymax = c + hw; }
+  const padY = (ymax - ymin)*0.12; ymin -= padY; ymax += padY;
+  const yt = niceTicks(ymin, ymax, 5), xt = niceTicks(o.xmin, o.xmax, o.xticks || 6);
+  const X = x => L + (x - o.xmin)/(o.xmax - o.xmin)*pw, Y = y => Tm + (1 - (y - ymin)/(ymax - ymin))*ph;
+  // 网格
+  ctx.strokeStyle = '#e8ecf3'; ctx.lineWidth = 1; ctx.fillStyle = '#667085';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (const v of yt.ticks){ const y = Math.round(Y(v)) + .5; ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke(); ctx.fillText(tickFmt(v, yt.step), L - 5, y); }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (const v of xt.ticks){ const x = Math.round(X(v)) + .5; ctx.beginPath(); ctx.moveTo(x, Tm); ctx.lineTo(x, Tm + ph); ctx.stroke(); ctx.fillText(tickFmt(v, xt.step), x, Tm + ph + 4); }
+  ctx.fillText(o.xlabel, L + pw/2, h - 14);
+  ctx.save(); ctx.translate(11, Tm + ph/2); ctx.rotate(-Math.PI/2); ctx.textBaseline = 'top'; ctx.fillText(o.ylabel, 0, 0); ctx.restore();
+  // 零线
+  if (ymin < 0 && ymax > 0){ ctx.strokeStyle = '#98a2b3'; ctx.beginPath(); ctx.moveTo(L, Y(0)); ctx.lineTo(L + pw, Y(0)); ctx.stroke(); }
+  ctx.strokeStyle = '#98a2b3'; ctx.strokeRect(L + .5, Tm + .5, pw, ph);
+  ctx.save(); ctx.beginPath(); ctx.rect(L, Tm, pw, ph); ctx.clip();
+  // 止点竖线
+  for (const vl of (o.vlines || [])){
+    if (vl.x < o.xmin - 1e-9 || vl.x > o.xmax + 1e-9) continue;
+    ctx.strokeStyle = vl.color || '#dc2626'; ctx.setLineDash([4,3]); ctx.beginPath(); ctx.moveTo(X(vl.x), Tm); ctx.lineTo(X(vl.x), Tm + ph); ctx.stroke(); ctx.setLineDash([]);
+  }
+  // 曲线
+  for (const s of (o.series || [])){
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width || 1.8; ctx.setLineDash(s.dash || []); ctx.beginPath();
+    let pen = false;
+    for (let i = 0; i < s.x.length; i++){
+      if (!isFinite(s.y[i])){ pen = false; continue; }
+      const px = X(s.x[i]), py = Y(s.y[i]);
+      if (!pen){ ctx.moveTo(px, py); pen = true; } else ctx.lineTo(px, py);
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  for (const s of (o.points || [])){
+    ctx.fillStyle = s.color; const rr = s.r || 2.2;
+    for (let i = 0; i < s.x.length; i++){ if (!isFinite(s.y[i])) continue; ctx.beginPath(); ctx.arc(X(s.x[i]), Y(s.y[i]), rr, 0, 6.2832); ctx.fill(); }
+  }
+  if (o.cursor !== undefined && o.cursor !== null){
+    ctx.strokeStyle = '#111827'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(o.cursor), Tm); ctx.lineTo(X(o.cursor), Tm + ph); ctx.stroke();
+    if (o.cursorY !== undefined && isFinite(o.cursorY)){ ctx.fillStyle = '#111827'; ctx.beginPath(); ctx.arc(X(o.cursor), Y(o.cursorY), 4, 0, 6.2832); ctx.fill(); }
+  }
+  ctx.restore();
+  ctx.lineWidth = 1;
+  // 止点标签
+  ctx.font = `10px ${FONT}`; ctx.textBaseline = 'top';
+  for (const vl of (o.vlines || [])){
+    if (!vl.label || vl.x < o.xmin - 1e-9 || vl.x > o.xmax + 1e-9) continue;
+    const x = X(vl.x); ctx.fillStyle = vl.color || '#dc2626';
+    ctx.textAlign = x > L + pw - 50 ? 'right' : 'left'; ctx.fillText(vl.label, x + (ctx.textAlign === 'left' ? 3 : -3), Tm + 2);
+  }
+  // 极值标注
+  const lab = (px, py, text, color, below) => {
+    ctx.fillStyle = color; ctx.beginPath(); ctx.arc(px, py, 3.5, 0, 6.2832); ctx.fill();
+    ctx.font = `600 11px ${FONT}`; const tw = ctx.measureText(text).width;
+    let tx = px + 6; if (tx + tw > L + pw - 2) tx = px - 6 - tw; if (tx < L + 2) tx = L + 2;
+    let ty = below ? py + 4 : py - 15; ty = Math.max(Tm + 2, Math.min(Tm + ph - 14, ty));
+    ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.fillRect(tx - 2, ty - 1, tw + 4, 14);
+    ctx.fillStyle = color; ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText(text, tx, ty);
+  };
+  if (o.annotate !== undefined && o.series && o.series[o.annotate]){
+    const s = o.series[o.annotate]; let imax = -1, imin = -1;
+    for (let i = 0; i < s.y.length; i++){ if (!isFinite(s.y[i])) continue; if (imax < 0 || s.y[i] > s.y[imax]) imax = i; if (imin < 0 || s.y[i] < s.y[imin]) imin = i; }
+    const xf = o.xfmtAnn || (v => f(v, 1));
+    if (imax >= 0) lab(X(s.x[imax]), Y(s.y[imax]), `max ${f(s.y[imax])} @${xf(s.x[imax])}`, '#b91c1c', true);
+    if (imin >= 0 && imin !== imax && (o.annMin !== false)) lab(X(s.x[imin]), Y(s.y[imin]), `min ${f(s.y[imin])} @${xf(s.x[imin])}`, '#1d4ed8', false);
+  }
+  if (o.highlight){
+    const hh = o.highlight; ctx.strokeStyle = '#ca8a04'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(X(hh.x), Y(hh.y), 7, 0, 6.2832); ctx.stroke(); ctx.lineWidth = 1;
+    lab(X(hh.x), Y(hh.y), hh.label, '#a16207', false);
+  }
+  if (o.legend){ ctx.font = `11px ${FONT}`; let lx = L + pw; ctx.textBaseline = 'top'; ctx.textAlign = 'right';
+    for (const lg of o.legend.slice().reverse()){ const tw = ctx.measureText(lg.t).width; ctx.fillStyle = lg.c; ctx.fillText(lg.t, lx, 5); ctx.fillRect(lx - tw - 16, 10, 12, 3); lx -= tw + 24; } }
+}
+
+/* ---- 主动画 ---- */
+function drawAnim(){
+  const cv = $('anim'), {ctx, w, h} = prep(cv);
+  ctx.font = `13px ${FONT}`;
+  if (!valid){
+    ctx.fillStyle = '#7f1d1d'; ctx.font = `600 18px ${FONT}`; ctx.textAlign = 'center';
+    ctx.fillText('参数无效:' + (validate(P).msg || ''), w/2, h/2);
+    return;
+  }
+  const r = P.r, l = P.l, H = P.sliderH, Ls = P.sliderL;
+  const x0 = -r - P.bw, x1 = r + l + Ls/2 + 10, yspan = Math.max(r + P.bw, H);
+  const sc = Math.min((w - 120)/(x1 - x0), (h - 150)/(2*yspan));
+  const cx0 = 60 - x0*sc, cy0 = h/2 + 6;
+  const WX = x => cx0 + x*sc, WY = y => cy0 - y*sc;
+  const k = kin(r, l, theta), d = dyn(P, theta);
+  const bx = r*Math.cos(theta), by = r*Math.sin(theta);
+  // 网格
+  ctx.strokeStyle = '#f0f2f7'; ctx.lineWidth = 1;
+  for (let gx = 0; gx < w; gx += 40){ ctx.beginPath(); ctx.moveTo(gx + .5, 0); ctx.lineTo(gx + .5, h); ctx.stroke(); }
+  for (let gy = 0; gy < h; gy += 40){ ctx.beginPath(); ctx.moveTo(0, gy + .5); ctx.lineTo(w, gy + .5); ctx.stroke(); }
+  // 导轨
+  const railY = WY(-H/2), railX0 = WX(-r - P.bw), railX1 = WX(r + l + Ls/2 + 10);
+  ctx.fillStyle = '#9aa4b5'; ctx.fillRect(railX0, railY, railX1 - railX0, 10);
+  ctx.strokeStyle = '#6b7689'; ctx.lineWidth = 1; ctx.beginPath();
+  for (let hx = railX0; hx < railX1; hx += 10){ ctx.moveTo(hx + 8, railY + 10); ctx.lineTo(hx, railY + 18); } ctx.stroke();
+  // 中心线
+  ctx.strokeStyle = '#94a3b8'; ctx.setLineDash([12,4,2,4]); ctx.beginPath(); ctx.moveTo(railX0, WY(0)); ctx.lineTo(railX1, WY(0)); ctx.stroke(); ctx.setLineDash([]);
+  // 轨迹圆
+  ctx.strokeStyle = '#cbd5e1'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.arc(WX(0), WY(0), r*sc, 0, 6.2832); ctx.stroke(); ctx.setLineDash([]);
+  // 止点标记
+  const dead = [{x:r + l, t:'外止点 θ=0°', th:0}, {x:l - r, t:'内止点 θ=180°', th:Math.PI}];
+  ctx.font = `12px ${FONT}`;
+  for (const dp of dead){
+    const near = Math.min(Math.abs(wrap(theta - dp.th + Math.PI) - Math.PI)) < 2*DEG;
+    ctx.strokeStyle = near ? '#dc2626' : '#ef9a9a'; ctx.lineWidth = near ? 2 : 1; ctx.setLineDash([5,4]);
+    ctx.beginPath(); ctx.moveTo(WX(dp.x), WY(yspan + 6)); ctx.lineTo(WX(dp.x), WY(-yspan - 6)); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+    ctx.fillStyle = '#dc2626'; ctx.textAlign = 'center'; ctx.fillText(dp.t + (near ? '  ◀ 到达死点' : ''), WX(dp.x), WY(yspan + 6) - 6);
+    ctx.beginPath(); ctx.arc(WX(dp.x), WY(0), 4, 0, 6.2832); ctx.fill();
+  }
+  // 行程标注
+  ctx.strokeStyle = '#0f766e'; ctx.fillStyle = '#0f766e'; ctx.lineWidth = 1.2;
+  const sy = railY + 38; ctx.beginPath(); ctx.moveTo(WX(l - r), sy); ctx.lineTo(WX(l + r), sy);
+  ctx.moveTo(WX(l - r), sy - 4); ctx.lineTo(WX(l - r), sy + 4); ctx.moveTo(WX(l + r), sy - 4); ctx.lineTo(WX(l + r), sy + 4); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.fillText('行程 S = 2r = ' + f(2*r) + ' mm', WX(l), sy + 15);
+  // 连杆
+  const barW = Math.max(6, P.bw*sc);
+  const bar = (ax, ay, bx2, by2, col) => {
+    ctx.lineCap = 'round'; ctx.strokeStyle = '#334155'; ctx.lineWidth = barW + 3; ctx.beginPath(); ctx.moveTo(WX(ax), WY(ay)); ctx.lineTo(WX(bx2), WY(by2)); ctx.stroke();
+    ctx.strokeStyle = col; ctx.lineWidth = barW; ctx.beginPath(); ctx.moveTo(WX(ax), WY(ay)); ctx.lineTo(WX(bx2), WY(by2)); ctx.stroke(); ctx.lineCap = 'butt'; ctx.lineWidth = 1;
+  };
+  bar(bx, by, k.x, 0, '#86b6f6');
+  bar(0, 0, bx, by, '#f6b26b');
+  // 滑块
+  ctx.fillStyle = '#6ee7b7'; ctx.strokeStyle = '#065f46'; ctx.lineWidth = 2;
+  ctx.fillRect(WX(k.x - Ls/2), WY(H/2), Ls*sc, H*sc); ctx.strokeRect(WX(k.x - Ls/2), WY(H/2), Ls*sc, H*sc); ctx.lineWidth = 1;
+  // 销
+  const pin = (px, py) => { ctx.fillStyle = '#fff'; ctx.strokeStyle = '#111827'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(WX(px), WY(py), Math.max(4, P.pinD*sc/2), 0, 6.2832); ctx.fill(); ctx.stroke(); ctx.lineWidth = 1; };
+  pin(0, 0); pin(bx, by); pin(k.x, 0);
+  // 机架符号
+  ctx.fillStyle = '#6b7689'; ctx.beginPath(); ctx.moveTo(WX(0), WY(0) + 8); ctx.lineTo(WX(0) - 14, WY(0) + 30); ctx.lineTo(WX(0) + 14, WY(0) + 30); ctx.closePath(); ctx.fill();
+  // 角度弧
+  ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(WX(0), WY(0), Math.min(36, r*sc*0.5), 0, -theta, true); ctx.stroke(); ctx.lineWidth = 1;
+  ctx.fillStyle = '#2563eb'; ctx.textAlign = 'left'; ctx.fillText('θ=' + f(theta/DEG, 1) + '°', WX(0) + 40, WY(0) - 8);
+  // 箭头
+  const arrow = (xa, ya, dx, dy, col, txt) => {
+    const len = Math.hypot(dx, dy); if (len < 2) return;
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(xa, ya); ctx.lineTo(xa + dx, ya + dy); ctx.stroke();
+    const ang = Math.atan2(dy, dx); ctx.beginPath(); ctx.moveTo(xa + dx, ya + dy);
+    ctx.lineTo(xa + dx - 9*Math.cos(ang - .4), ya + dy - 9*Math.sin(ang - .4)); ctx.lineTo(xa + dx - 9*Math.cos(ang + .4), ya + dy - 9*Math.sin(ang + .4)); ctx.closePath(); ctx.fill(); ctx.lineWidth = 1;
+    if (txt){ ctx.textAlign = 'center'; ctx.fillText(txt, xa + dx/2, ya + dy/2 - 8); }
+  };
+  const sxp = WX(k.x), syp = WY(0) - H*sc/2 - 14;
+  const vmaxPx = 70, lenOf = (val, vmax) => vmax > 0 ? Math.max(-90, Math.min(90, val/vmax*vmaxPx)) : 0;
+  arrow(sxp, syp, lenOf(d.v, stats.vmax), 0, '#2563eb', 'v');
+  arrow(sxp, syp - 20, lenOf(d.Fx, Math.max(Math.abs(P.F), 1)), 0, '#dc2626', P.F > 0 ? 'F载荷' : '');
+  arrow(sxp, syp - 40, lenOf(d.a, stats.amax), 0, '#9333ea', 'a');
+  // HUD
+  ctx.fillStyle = '#1d2433'; ctx.textAlign = 'left'; ctx.font = `600 13px ${FONT}`;
+  ctx.fillText(`x = ${f(k.x)} mm    v = ${f(d.v)} m/s    a = ${f(d.a)} m/s²    τ = ${f(d.tau)} N·m    连杆角 φ = ${f(k.phi/DEG, 1)}°`, 12, 20);
+  ctx.font = `11px ${FONT}`; ctx.fillStyle = '#667085';
+  ctx.fillText(running ? '▶ 运行中' : '⏸ 已暂停', 12, 38);
+  ctx.fillText('蓝:速度  紫:加速度  红:载荷力(箭头已按比例缩放)', 12, h - 10);
+}
+
+/* ---- 读数面板 ---- */
+const LIVE = [['θ','th','°'],['位置 x','x','mm'],['速度 v','v','m/s'],['加速度 a','a','m/s²'],['连杆角 φ','phi','°'],['杆力 T (拉+/压−)','T','N'],
+  ['导轨正压力 N','N','N'],['摩擦力 Ff','Ff','N'],['载荷力 Fx','Fx','N'],['曲柄驱动扭矩 τ','tau','N·m'],['O 铰反力 Ox','Ox','N'],['O 铰反力 Oy','Oy','N'],['驱动功率','P','W']];
+const SUMS = [['行程 S','stroke','mm'],['外止点位置','xmax','mm'],['内止点位置','xmin','mm'],['峰值速度','vmax','m/s'],['峰值加速度','amax','m/s²'],
+  ['峰值扭矩','taupeak','N·m'],['平均扭矩','taumean','N·m'],['RMS 扭矩','taurms','N·m'],['最大杆力','Tpeak','N'],['最大连杆角','phimax','°'],['最大正压力','Npeak','N'],['O 铰最大反力','Opeak','N']];
+function buildTiles(){
+  $('tilesLive').innerHTML = LIVE.map(a => `<div class="tile"><b>${a[0]} [${a[2]}]</b><span id="lv_${a[1]}">—</span></div>`).join('');
+  $('tilesSum').innerHTML = SUMS.map(a => `<div class="tile sum"><b>${a[0]} [${a[2]}]</b><span id="sm_${a[1]}">—</span></div>`).join('');
+}
+function updateTiles(){
+  if (!valid){ document.querySelectorAll('.tile span').forEach(e => e.textContent = '—'); return; }
+  const d = dyn(P, theta); d.th = wrap(theta)/DEG; d.phi = d.phi/DEG;
+  for (const a of LIVE){ $('lv_' + a[1]).textContent = f(d[a[1]], a[1] === 'th' ? 1 : undefined); }
+  const s = Object.assign({}, stats); s.phimax = s.phimax/DEG;
+  for (const a of SUMS){ $('sm_' + a[1]).textContent = f(s[a[1]]); }
+}
+
+/* ---- 曲线 ---- */
+function plotAll(){
+  const ang = $('xmode').value === 'angle';
+  const w = omega(), Tper = w > 0 ? 2*Math.PI/w : 1;
+  const specs = [
+    ['pX','位置 x(θ)','x [mm]','x','#2563eb',true,1],
+    ['pV','速度 v(θ)','v [m/s]','v','#059669',true,1],
+    ['pA','加速度 a(θ)','a [m/s²]','a','#9333ea',true,1],
+    ['pT','曲柄驱动扭矩 τ(θ)','τ [N·m]','tau','#dc2626',true,1]];
+  for (const [id, title, yl, key, col] of specs){
+    const cv = $(id);
+    if (!valid){ drawChart(cv, {title, empty:'参数无效,无曲线'}); continue; }
+    const xs = ang ? curves.th.map(t => t/DEG) : curves.t.map(t => t*1000);
+    const xmax = ang ? 360 : Tper*1000;
+    const cur = ang ? wrap(theta)/DEG : wrap(theta)/w*1000;
+    const o = {title, ylabel:yl, xlabel:ang ? '曲柄角 θ [°]' : '时间 t [ms]', xmin:0, xmax, xticks:ang ? 6 : 6,
+      series:[{x:xs, y:curves[key], color:col}], annotate:0, zero:key !== 'x', cursor:cur, cursorY:dyn(P, theta)[key],
+      xfmtAnn: ang ? (v => f(v, 0) + '°') : (v => f(v, 1) + 'ms'),
+      vlines:[{x:0, label:'外止点', color:'#dc2626'}, {x:xmax/2, label:'内止点', color:'#dc2626'}, {x:xmax, label:'', color:'#dc2626'}]};
+    if (key === 'x' && calib){
+      const pts = foldMeasured(ang);
+      o.points = [{x:pts.x, y:pts.y, color:'rgba(234,88,12,.75)', r:2}];
+      o.legend = [{t:'仿真', c:col}, {t:'实测(折叠)', c:'#ea580c'}];
+    }
+    drawChart(cv, o);
+  }
+}
+function foldMeasured(ang){
+  const w = omega(), res = {x:[], y:[]};
+  if (!calib || !(w > 0)) return res;
+  const ph = parseFloat($('caPhase').value) || 0, off = calOffset();
+  for (let i = 0; i < calib.t.length; i++){
+    const th = wrap(ph*DEG + w*calib.t[i]);
+    res.x.push(ang ? th/DEG : th/w*1000); res.y.push(calib.x[i] - off);
+  }
+  return res;
+}
+
+/* ---- 控制 ---- */
+let lastT = performance.now();
+function frame(now){
+  const dt = Math.min(0.1, (now - lastT)/1000); lastT = now;
+  if (running && valid) theta = wrap(theta + omega()*dt*speed);
+  render();
+  requestAnimationFrame(frame);
+}
+function render(){
+  drawAnim(); updateTiles(); plotAll();
+  $('angSlider').value = wrap(theta)/DEG; $('angV').textContent = f(wrap(theta)/DEG, 1) + '°';
+  if (sweep) drawSweepCharts();
+  if (calib) drawCalib();
+}
+function setRunning(b){ running = b && valid; $('bPlay').textContent = running ? '⏸ 暂停' : '▶ 播放'; $('bPlay').classList.toggle('pri', running); }
+
+function bindControls(){
+  $('bPlay').onclick = () => setRunning(!running);
+  $('bStep').onclick = () => { setRunning(false); theta = wrap(theta + (parseFloat($('stepDeg').value) || 5)*DEG); };
+  $('bBack').onclick = () => { setRunning(false); theta = wrap(theta - (parseFloat($('stepDeg').value) || 5)*DEG); };
+  $('bReset').onclick = () => { theta = 0; };
+  $('speed').oninput = e => { speed = Math.pow(10, parseFloat(e.target.value)); $('speedV').textContent = speed.toFixed(2) + '×'; };
+  $('angSlider').oninput = e => { setRunning(false); theta = parseFloat(e.target.value)*DEG; };
+  $('loadMode').onchange = e => { P.loadMode = e.target.value; recompute(); };
+  $('gravity').onchange = e => { P.g = e.target.checked; recompute(); };
+  document.addEventListener('keydown', e => { if (e.code === 'Space' && !/INPUT|SELECT|TEXTAREA/.test(e.target.tagName)){ e.preventDefault(); setRunning(!running); } });
+  document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+    document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.id === 'tab-' + b.dataset.tab));
+    if (b.dataset.tab === 'export') refreshSvgPreview();
+  });
+}
+
+/* ================= 参数扫描 ================= */
+function initSweepUI(){
+  $('swParam').innerHTML = SWEEP_PARAMS.map(p => `<option value="${p.id}">${p.label} [${p.unit || '–'}]</option>`).join('');
+  $('swParam').onchange = fillSweepRange;
+  $('swRun').onclick = runSweep; $('swBest').onclick = highlightBest; $('swApply').onclick = applyBest;
+  fillSweepRange();
+}
+function fillSweepRange(){
+  const id = $('swParam').value, v = P[id]; let a = v*0.5, b = v*1.5;
+  if (id === 'r'){ a = v*0.4; b = Math.min(v*1.6, P.l*0.95); }
+  if (id === 'l'){ a = Math.max(P.r*1.1, v*0.6); b = v*1.6; }
+  if (id === 'mu'){ a = 0; b = 0.5; }
+  if (id === 'F'){ a = 0; b = Math.max(v*2, 10); }
+  $('swFrom').value = +a.toPrecision(4); $('swTo').value = +b.toPrecision(4);
+}
+function runSweep(){
+  const id = $('swParam').value, a = parseFloat($('swFrom').value), b = parseFloat($('swTo').value);
+  const n = Math.max(3, Math.min(400, parseInt($('swN').value) || 40));
+  if (!isFinite(a) || !isFinite(b) || a === b){ $('swMsg').textContent = '请输入有效的扫描范围'; return; }
+  const vals = [], res = [];
+  for (let i = 0; i < n; i++){
+    const val = a + (b - a)*i/(n - 1); vals.push(val);
+    const p = Object.assign({}, P); p[id] = val;
+    const vd = validate(p);
+    if (!vd.ok || !(p.rpm > 0)){ res.push({val, ok:false}); continue; }
+    const s = statsOf(computeCurves(p, 720));
+    res.push({val, ok:true, stroke:s.stroke, vmax:s.vmax, amax:s.amax, taupeak:s.taupeak, taurms:s.taurms});
+  }
+  sweep = {param:id, vals, res, best:-1};
+  const bad = res.filter(r => !r.ok).length;
+  $('swMsg').textContent = `扫描完成:${PLABEL[id]} ∈ [${f(a)}, ${f(b)}],共 ${n} 点` + (bad ? `,其中 ${bad} 点因 l ≤ r 等无效而跳过` : '') + '。';
+  buildSweepTable();
+  highlightBest();
+}
+const CRIT = {
+  minAmax:{key:r => r.amax, dir:1, name:'峰值加速度最小'},
+  minTau:{key:r => r.taupeak, dir:1, name:'峰值扭矩最小'},
+  minTauRms:{key:r => r.taurms, dir:1, name:'RMS 扭矩最小'},
+  minTauPerStroke:{key:r => r.taupeak/r.stroke, dir:1, name:'峰值扭矩/行程 最小'},
+  maxStroke:{key:r => r.stroke, dir:-1, name:'行程最大'},
+};
+function highlightBest(){
+  if (!sweep){ $('swMsg').textContent = '请先运行扫描'; return; }
+  const c = CRIT[$('swCrit').value], minS = parseFloat($('swMinStroke').value) || 0;
+  let best = -1, bv = Infinity;
+  sweep.res.forEach((r, i) => { if (!r.ok || r.stroke < minS - 1e-9) return; const v = c.key(r)*c.dir; if (v < bv - 1e-12){ bv = v; best = i; } });
+  sweep.best = best; sweep.critName = c.name;
+  const r = sweep.res[best];
+  $('swMsg').textContent = best < 0 ? '没有满足约束的有效点(检查行程下限)。' :
+    `最优(${c.name}${minS > 0 ? ',行程 ≥ ' + f(minS) + ' mm' : ''}):${PLABEL[sweep.param]} = ${f(r.val, 3)} ${PUNIT[sweep.param]} → 行程 ${f(r.stroke)} mm,峰值加速度 ${f(r.amax)} m/s²,峰值扭矩 ${f(r.taupeak)} N·m`;
+  buildSweepTable(); drawSweepCharts();
+}
+function applyBest(){
+  if (!sweep || sweep.best < 0){ $('swMsg').textContent = '没有可应用的最优点,请先运行扫描并高亮最优。'; return; }
+  setParam(sweep.param, +sweep.res[sweep.best].val.toPrecision(5));
+  $('swMsg').textContent += '  ✔ 已应用到设计。';
+}
+function buildSweepTable(){
+  const id = sweep.param;
+  let h = `<tr><th class="l">#</th><th>${PLABEL[id]} [${PUNIT[id] || '–'}]</th><th>行程 [mm]</th><th>峰值速度 [m/s]</th><th>峰值加速度 [m/s²]</th><th>峰值扭矩 [N·m]</th><th>RMS 扭矩 [N·m]</th></tr>`;
+  sweep.res.forEach((r, i) => {
+    h += r.ok ? `<tr class="${i === sweep.best ? 'best' : ''}"><td class="l">${i + 1}${i === sweep.best ? ' ★' : ''}</td><td>${f(r.val, 3)}</td><td>${f(r.stroke)}</td><td>${f(r.vmax)}</td><td>${f(r.amax)}</td><td>${f(r.taupeak)}</td><td>${f(r.taurms)}</td></tr>`
+      : `<tr><td class="l">${i + 1}</td><td>${f(r.val, 3)}</td><td colspan="5" class="l" style="color:#dc2626">无效(l ≤ r 等)</td></tr>`;
+  });
+  $('swTable').innerHTML = h;
+}
+function drawSweepCharts(){
+  const defs = [['sw1','行程 S vs ' + PLABEL[sweep.param],'S [mm]','stroke','#0ea5a4'],['sw2','峰值加速度','a_max [m/s²]','amax','#9333ea'],['sw3','峰值扭矩','τ_peak [N·m]','taupeak','#dc2626']];
+  const xs = sweep.vals;
+  for (const [id, title, yl, key, col] of defs){
+    const ys = sweep.res.map(r => r.ok ? r[key] : NaN);
+    const o = {title, ylabel:yl, xlabel:PLABEL[sweep.param] + ' [' + (PUNIT[sweep.param] || '–') + ']',
+      xmin:Math.min(xs[0], xs[xs.length - 1]), xmax:Math.max(xs[0], xs[xs.length - 1]), series:[{x:xs, y:ys, color:col}], points:[{x:xs, y:ys, color:col, r:2}], annotate:0, xticks:5,
+      xfmtAnn:v => f(v, 2)};
+    if (sweep.best >= 0 && sweep.res[sweep.best].ok){ const r = sweep.res[sweep.best]; o.highlight = {x:r.val, y:r[key], label:'最优 ' + f(r.val, 2)}; }
+    drawChart($(id), o);
+  }
+}
+
+/* ================= 导出 ================= */
+function download(name, text, mime){
+  const blob = new Blob([text], {type:mime || 'text/plain'}), a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+function designJSON(){
+  const v = validate(P), s = valid ? stats : null;
+  return {app:'机械结构虚拟试验台', mechanism:'crank-slider', version:1, created:new Date().toISOString(),
+    units:{length:'mm', mass:'kg', force:'N', speed:'rpm', torque:'N·m', angle:'deg'},
+    parameters:{r:P.r, l:P.l, rpm:P.rpm, sliderMass:P.m, loadForce:P.F, loadMode:P.loadMode, frictionCoeff:P.mu, gravity:P.g,
+      barWidth:P.bw, barThickness:P.bt, pinDiameter:P.pinD, sliderLength:P.sliderL, sliderHeight:P.sliderH},
+    validity:{ok:v.ok, message:v.msg},
+    derived: s ? {stroke:s.stroke, outerDeadPoint:{theta_deg:0, x:P.l + P.r}, innerDeadPoint:{theta_deg:180, x:P.l - P.r}, rodRatio_l_over_r:P.l/P.r,
+      maxRodAngle_deg:Math.asin(P.r/P.l)/DEG, peakVelocity:s.vmax, peakAcceleration:s.amax, peakTorque:s.taupeak, meanTorque:s.taumean, rmsTorque:s.taurms,
+      peakRodForce:s.Tpeak, peakGuideNormal:s.Npeak} : null};
+}
+function simCSV(stepDeg){
+  const step = Math.max(0.1, Math.min(30, stepDeg || 1)), w = omega();
+  const rows = ['theta_deg,time_s,x_mm,v_m_s,a_m_s2,rod_angle_deg,rod_force_N,guide_normal_N,friction_N,load_force_N,crank_torque_Nm,O_Fx_N,O_Fy_N,drive_power_W'];
+  for (let a = 0; a <= 360 + 1e-9; a += step){
+    const d = dyn(P, a*DEG);
+    rows.push([a, a*DEG/w, d.x, d.v, d.a, d.phi/DEG, d.T, d.N, d.Ff, d.Fx, d.tau, d.Ox, d.Oy, d.P].map(v => +(+v).toPrecision(9)).join(','));
+  }
+  return rows.join('\n') + '\n';
+}
+function bomRows(){
+  const rho = 7850, mm3 = 1e-9;
+  const barMass = Lc => (Lc*P.bw + Math.PI*P.bw*P.bw/4)*P.bt*mm3*rho;
+  return [
+    ['1','机架 / 直线导轨','1','长度 ≥ '+f(2*P.r + P.sliderL + 40, 1)+' mm(行程 '+f(2*P.r,1)+' + 滑块长 '+P.sliderL+' + 余量 40)','导轨轴线过曲柄轴心 O(无偏距)','—'],
+    ['2','曲柄','1','孔距 r = '+f(P.r,2)+' mm;截面 '+P.bw+' × '+P.bt+' mm;总长 ≈ '+f(P.r + P.bw,1)+' mm;孔 Ø'+P.pinD,'45 钢(估)',f(barMass(P.r),3)+' kg'],
+    ['3','连杆','1','孔距 l = '+f(P.l,2)+' mm;截面 '+P.bw+' × '+P.bt+' mm;总长 ≈ '+f(P.l + P.bw,1)+' mm;孔 Ø'+P.pinD,'45 钢(估)',f(barMass(P.l),3)+' kg'],
+    ['4','滑块','1',P.sliderL+' (长) × '+P.sliderH+' (高) mm;销孔 Ø'+P.pinD+',位于中心','质量取仿真参数',f(P.m,3)+' kg'],
+    ['5','曲柄轴销 (O)','1','Ø'+P.pinD+' × '+f(P.bt + 6,1)+' mm','与机架、曲柄配合','—'],
+    ['6','曲柄—连杆销 (B)','1','Ø'+P.pinD+' × '+f(2*P.bt + 6,1)+' mm','曲柄与连杆铰接','—'],
+    ['7','连杆—滑块销 (C)','1','Ø'+P.pinD+' × '+f(P.bt + P.sliderL*0 + 6,1)+' mm(随滑块耳板厚度调整)','连杆与滑块铰接','—'],
+  ];
+}
+function updateBOM(){
+  const rows = bomRows();
+  $('bom').innerHTML = '<tr><th class="l">序号</th><th class="l">名称</th><th>数量</th><th class="l">关键尺寸</th><th class="l">材料 / 备注</th><th>估算质量</th></tr>' +
+    rows.map(r => '<tr>' + r.map((c, i) => `<td class="${i === 3 || i === 4 || i === 1 || i === 0 ? 'l' : ''}">${c}</td>`).join('') + '</tr>').join('');
+}
+function bomCSV(){
+  const q = s => '"' + String(s).replace(/"/g, '""') + '"';
+  return '\ufeff' + ['序号,名称,数量,关键尺寸,材料/备注,估算质量'].concat(bomRows().map(r => r.map(q).join(','))).join('\n') + '\n';
+}
+
+/* SVG 尺寸图 */
+function buildSVG(angDeg){
+  const r = P.r, l = P.l, th = angDeg*DEG, k = kin(r, l, th);
+  const H = P.sliderH, Ls = P.sliderL;
+  const bx = r*Math.cos(th), by = -r*Math.sin(th);     // SVG y 向下
+  const x0 = -r - 60, x1 = r + l + Ls/2 + 60, y0 = -(Math.max(r, H/2) + 75);
+  const W = x1 - x0, u = W/900;                         // u: 1 个显示像素对应的 mm
+  const ry = H/2, ybase = Math.max(r + P.bw/2, ry + 10*u) + 12*u;   // 尺寸线基准 y(SVG 向下为正)
+  const y1 = ybase + 74*u + 110*u, Hh = y1 - y0;
+  const n = v => +v.toFixed(3);
+  const out = [];
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const text = (x, y, s, o = {}) => out.push(`<text x="${n(x)}" y="${n(y)}" font-size="${n((o.size || 12)*u)}" fill="${o.fill || '#111'}" stroke="#fff" stroke-width="${n(3*u)}" stroke-linejoin="round" paint-order="stroke" text-anchor="${o.anchor || 'middle'}"${o.rot ? ` transform="rotate(${n(o.rot)} ${n(x)} ${n(y)})"` : ''}${o.bold ? ' font-weight="bold"' : ''}>${esc(s)}</text>`);
+  const line = (a, b, c, d, o = {}) => out.push(`<line x1="${n(a)}" y1="${n(b)}" x2="${n(c)}" y2="${n(d)}" stroke="${o.stroke || '#111'}" stroke-width="${n((o.w || 1)*u)}"${o.dash ? ` stroke-dasharray="${o.dash.map(v => n(v*u)).join(' ')}"` : ''}${o.arrows ? ' marker-start="url(#ar)" marker-end="url(#ar)"' : ''}/>`);
+  // 尺寸线:沿 p1→p2 方向,向法线偏移 off(SVG 坐标,mm)
+  const dim = (p1, p2, off, label, o = {}) => {
+    const dx = p2[0] - p1[0], dy = p2[1] - p1[1], L = Math.hypot(dx, dy) || 1, nx = -dy/L*off, ny = dx/L*off;
+    const a = [p1[0] + nx, p1[1] + ny], b = [p2[0] + nx, p2[1] + ny], e = Math.sign(off)*6*u;
+    line(p1[0], p1[1], a[0] + (nx ? nx/Math.abs(off)*e : 0), a[1] + (ny ? ny/Math.abs(off)*e : 0), {stroke:'#666', w:.6});
+    line(p2[0], p2[1], b[0] + (nx ? nx/Math.abs(off)*e : 0), b[1] + (ny ? ny/Math.abs(off)*e : 0), {stroke:'#666', w:.6});
+    line(a[0], a[1], b[0], b[1], {stroke:o.color || '#0b5ed7', w:1, arrows:true});
+    let ang = Math.atan2(dy, dx)/DEG; if (ang > 90) ang -= 180; if (ang < -90) ang += 180;
+    const mx = (a[0] + b[0])/2 + (-dy/L)*Math.sign(off)*5*u, my = (a[1] + b[1])/2 + (dx/L)*Math.sign(off)*5*u;
+    text(mx, my, label, {fill:o.color || '#0b5ed7', rot:ang, size:12});
+  };
+  out.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${n(x0)} ${n(y0)} ${n(W)} ${n(Hh)}" width="${n(W/u)}" height="${n(Hh/u)}" font-family="'Noto Sans CJK SC','Microsoft YaHei','PingFang SC',sans-serif">`);
+  out.push(`<defs><marker id="ar" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="${n(7)}" markerHeight="${n(7)}" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#0b5ed7"/></marker></defs>`);
+  out.push(`<rect x="${n(x0)}" y="${n(y0)}" width="${n(W)}" height="${n(Hh)}" fill="#fff"/>`);
+  text(x0 + 10*u, y0 + 20*u, '机械结构虚拟试验台 — 曲柄滑块机构尺寸图', {anchor:'start', size:16, bold:true});
+  text(x0 + 10*u, y0 + 38*u, `曲柄角 θ = ${f(angDeg, 2)}°    单位 mm    ${new Date().toISOString().slice(0, 10)}`, {anchor:'start', size:11, fill:'#555'});
+  // 导轨 + 剖面线
+  const rx0 = -r - 40, rx1 = r + l + Ls/2 + 40;
+  out.push(`<rect x="${n(rx0)}" y="${n(ry)}" width="${n(rx1 - rx0)}" height="${n(10*u)}" fill="#c3cad6" stroke="#333" stroke-width="${n(u)}"/>`);
+  for (let hx = rx0; hx < rx1; hx += 10*u) line(hx + 8*u, ry + 10*u, hx, ry + 18*u, {stroke:'#777', w:.7});
+  line(rx0 - 10*u, 0, rx1 + 10*u, 0, {stroke:'#888', w:.7, dash:[12, 3, 2, 3]});
+  // 轨迹圆、死点
+  out.push(`<circle cx="0" cy="0" r="${n(r)}" fill="none" stroke="#aaa" stroke-width="${n(.8*u)}" stroke-dasharray="${n(4*u)} ${n(3*u)}"/>`);
+  for (const dp of [{x:l + r, t:'外止点 θ=0°'}, {x:l - r, t:'内止点 θ=180°'}]){
+    line(dp.x, -(Math.max(r, H/2) + 60*u), dp.x, ybase + 48*u, {stroke:'#e11d48', w:.8, dash:[5, 3]});
+    text(dp.x, -(Math.max(r, H/2) + 64*u), dp.t, {fill:'#e11d48', size:11});
+  }
+  // 杆件
+  const bar = (ax, ay, bx2, by2, fill) => {
+    line(ax, ay, bx2, by2, {stroke:'#222', w:0}); out.pop();
+    out.push(`<line x1="${n(ax)}" y1="${n(ay)}" x2="${n(bx2)}" y2="${n(by2)}" stroke="#222" stroke-width="${n(P.bw + 2*u)}" stroke-linecap="round"/>`);
+    out.push(`<line x1="${n(ax)}" y1="${n(ay)}" x2="${n(bx2)}" y2="${n(by2)}" stroke="${fill}" stroke-width="${n(P.bw)}" stroke-linecap="round"/>`);
+  };
+  bar(bx, by, k.x, 0, '#aecbfa'); bar(0, 0, bx, by, '#fbd5a5');
+  out.push(`<rect x="${n(k.x - Ls/2)}" y="${n(-H/2)}" width="${n(Ls)}" height="${n(H)}" fill="#a7f3d0" stroke="#065f46" stroke-width="${n(1.5*u)}"/>`);
+  for (const [px, py] of [[0, 0], [bx, by], [k.x, 0]]) out.push(`<circle cx="${n(px)}" cy="${n(py)}" r="${n(P.pinD/2)}" fill="#fff" stroke="#111" stroke-width="${n(1.5*u)}"/><circle cx="${n(px)}" cy="${n(py)}" r="${n(1.5*u)}" fill="#111"/>`);
+  text(-P.pinD/2 - 10*u, P.pinD/2 + 14*u, 'O', {size:13, bold:true}); text(bx + P.pinD/2 + 9*u, by - P.pinD/2 - 3*u, 'B', {size:13, bold:true}); text(k.x + P.pinD/2 + 10*u, 5*u, 'C', {size:13, bold:true});
+  // 角度弧
+  const ar = Math.min(40*u, r*0.5); out.push(`<path d="M ${n(ar)} 0 A ${n(ar)} ${n(ar)} 0 ${angDeg % 360 > 180 ? 1 : 0} 0 ${n(ar*Math.cos(th))} ${n(-ar*Math.sin(th))}" fill="none" stroke="#0b5ed7" stroke-width="${n(1.2*u)}"/>`);
+  if (Math.abs(angDeg % 360) > 1e-6) text(ar*1.5*Math.cos(th/2) + 8*u, -ar*1.5*Math.sin(th/2) + 4*u, 'θ=' + f(angDeg, 1) + '°', {size:11, fill:'#0b5ed7'});
+  // 尺寸
+  const hb = P.bw/2 + 20*u;
+  dim([0, 0], [bx, by], -hb, 'r = ' + f(r, 2));
+  dim([bx, by], [k.x, 0], -hb, 'l = ' + f(l, 2));
+  for (const xx of [0, k.x]) line(xx, Math.min(ry + 10*u, ybase), xx, ybase + 22*u, {stroke:'#666', w:.6});
+  dim([0, ybase], [k.x, ybase], 22*u, 'x = ' + f(k.x, 2), {color:'#0f766e'});
+  for (const xx of [-r, r]) line(xx, ry + 10*u, xx, ybase + 74*u, {stroke:'#666', w:.6});
+  dim([l - r, ybase], [l + r, ybase], 48*u, '行程 S = 2r = ' + f(2*r, 2), {color:'#be185d'});
+  dim([-r, ybase], [r, ybase], 74*u, '曲柄回转直径 2r = ' + f(2*r, 2), {color:'#7c3aed'});
+  dim([k.x - Ls/2, -H/2], [k.x + Ls/2, -H/2], -(14*u), Ls + '', {color:'#555'});
+  // 参数表
+  const rows = [`l/r = ${f(l/r, 3)}`, `连杆摆角 φ = ${f(k.phi/DEG, 2)}°(最大 ${f(Math.asin(r/l)/DEG, 2)}°)`, `内/外止点 x = ${f(l - r, 2)} / ${f(l + r, 2)}`, `杆宽×厚 = ${P.bw}×${P.bt},销径 Ø${P.pinD}`];
+  rows.forEach((s, i) => text(x0 + 10*u, y1 - (rows.length - i)*17*u + 4*u, s, {anchor:'start', size:11, fill:'#333'}));
+  out.push('</svg>');
+  return out.join('\n');
+}
+function refreshSvgPreview(){
+  if (!valid){ $('svgPrev').textContent = '参数无效,无法生成。'; return; }
+  $('svgPrev').innerHTML = buildSVG(parseFloat($('svgAng').value) || 0);
+}
+function initExport(){
+  $('exJson').onclick = () => download('crank-slider-design-' + stamp() + '.json', JSON.stringify(designJSON(), null, 2), 'application/json');
+  $('exCsv').onclick = () => valid ? download('crank-slider-sim-' + stamp() + '.csv', simCSV(parseFloat($('csvStep').value)), 'text/csv') : alert('参数无效');
+  $('exSvg').onclick = () => valid ? download('crank-slider-drawing-' + stamp() + '.svg', buildSVG(parseFloat($('svgAng').value) || 0), 'image/svg+xml') : alert('参数无效');
+  $('exBomCsv').onclick = () => download('crank-slider-bom-' + stamp() + '.csv', bomCSV(), 'text/csv');
+  $('svgCur').onclick = () => { $('svgAng').value = +(wrap(theta)/DEG).toFixed(2); refreshSvgPreview(); };
+  $('svgAng').oninput = refreshSvgPreview;
+  $('exLoad').onclick = () => $('exLoadFile').click();
+  $('exLoadFile').onchange = async e => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      const j = JSON.parse(await file.text()), q = j.parameters || {};
+      const map = {r:'r', l:'l', rpm:'rpm', m:'sliderMass', F:'loadForce', mu:'frictionCoeff', bw:'barWidth', bt:'barThickness', pinD:'pinDiameter', sliderL:'sliderLength', sliderH:'sliderHeight'};
+      for (const key in map){ const v = q[map[key]]; if (typeof v === 'number' && isFinite(v)) P[key] = v; }
+      if (typeof q.gravity === 'boolean') P.g = q.gravity;
+      if (q.loadMode === 'const' || q.loadMode === 'oppose') P.loadMode = q.loadMode;
+      syncAllInputs(); refreshSvgPreview();
+    } catch (err){ alert('无法解析设计 JSON:' + err.message); }
+    e.target.value = '';
+  };
+}
+
+/* ================= 标定:实测 CSV ================= */
+function parseMeasured(text){
+  const t = [], x = []; const tu = parseFloat($('caTU').value), pu = parseFloat($('caPU').value);
+  for (let line of text.replace(/^\ufeff/, '').split(/\r?\n/)){
+    line = line.trim(); if (!line || line[0] === '#') continue;
+    const c = line.split(/[,;\t]+|\s+/).filter(s => s !== '');
+    if (c.length < 2) continue;
+    const a = parseFloat(c[0]), b = parseFloat(c[1]);
+    if (!isFinite(a) || !isFinite(b)) continue;          // 表头 / 非数值行跳过
+    t.push(a*tu); x.push(b*pu);
+  }
+  const idx = t.map((_, i) => i).sort((i, j) => t[i] - t[j]);
+  return {t:idx.map(i => t[i]), x:idx.map(i => x[i]), raw:text};
+}
+function calOffset(){
+  if (!calib) return parseFloat($('caOff').value) || 0;
+  if ($('caAutoOff').checked){ const w = omega(), ph = (parseFloat($('caPhase').value) || 0)*DEG; return autoOffset(ph, w); }
+  return parseFloat($('caOff').value) || 0;
+}
+// 偏置定义:实测 = 仿真 + off(off = 实测 − 仿真 均值)
+function autoOffset(ph, w){
+  let s = 0; for (let i = 0; i < calib.t.length; i++) s += calib.x[i] - kin(P.r, P.l, ph + w*calib.t[i]).x;
+  return s/calib.t.length;
+}
+function calError(ph, off){
+  const w = omega(); let s2 = 0, s = 0, mx = 0; const n = calib.t.length, e = [];
+  for (let i = 0; i < n; i++){
+    const xs = kin(P.r, P.l, ph + w*calib.t[i]).x + off, er = calib.x[i] - xs;
+    e.push(er); s += er; s2 += er*er; if (Math.abs(er) > mx) mx = Math.abs(er);
+  }
+  return {rms:Math.sqrt(s2/n), mean:s/n, max:mx, e, n};
+}
+function loadMeasured(text){
+  const m = parseMeasured(text);
+  if (m.t.length < 2){ alert('未解析到有效数据(需要至少两行"时间, 位置"数值)。'); return; }
+  calib = m; updateCalib();
+}
+function updateCalib(){
+  if (!calib){ $('caTiles').innerHTML = '<div class="note">尚未导入实测数据。可点"生成示例数据"体验。</div>'; return; }
+  if (!valid){ $('caTiles').innerHTML = '<div class="status bad">参数无效,无法对比。</div>'; return; }
+  const ph = (parseFloat($('caPhase').value) || 0)*DEG;
+  const off = $('caAutoOff').checked ? autoOffset(ph, omega()) : (parseFloat($('caOff').value) || 0);
+  if ($('caAutoOff').checked) $('caOff').value = +off.toFixed(4);
+  const er = calError(ph, off);
+  const tile = (a, b, cls) => `<div class="tile ${cls || ''}"><b>${a}</b><span>${b}</span></div>`;
+  $('caTiles').innerHTML = tile('数据点数', er.n) + tile('时间跨度 [s]', f(calib.t[calib.t.length - 1] - calib.t[0])) +
+    tile('RMS 误差 [mm]', f(er.rms, 4), 'sum') + tile('平均误差 [mm]', f(er.mean, 4)) + tile('最大绝对误差 [mm]', f(er.max, 4)) +
+    tile('相对行程 RMS [%]', f(er.rms/(2*P.r)*100, 3), 'sum') + tile('θ₀ [°] / 偏置 [mm]', f(ph/DEG, 2) + ' / ' + f(off, 3));
+  calib.err = er; calib.off = off; calib.ph = ph;
+}
+function autoAlign(){
+  if (!calib || !valid) return;
+  const w = omega(), useOff = true;
+  const cost = ph => { const off = autoOffset(ph, w); return calError(ph, off).rms; };
+  let best = 0, bc = Infinity;
+  for (let a = 0; a < 360; a += 0.5){ const c = cost(a*DEG); if (c < bc){ bc = c; best = a; } }
+  let lo = best - 0.5, hi = best + 0.5;
+  for (let it = 0; it < 40; it++){ const m1 = lo + (hi - lo)/3, m2 = hi - (hi - lo)/3; if (cost(m1*DEG) < cost(m2*DEG)) hi = m2; else lo = m1; }
+  best = (lo + hi)/2; best = ((best % 360) + 360) % 360;
+  $('caPhase').value = +best.toFixed(3); $('caAutoOff').checked = useOff; updateCalib();
+}
+function drawCalib(){
+  if (!valid || !calib || !calib.err) return;
+  const w = omega(), t0 = calib.t[0], t1 = calib.t[calib.t.length - 1], span = Math.max(t1 - t0, 1e-9);
+  const sx = [], sy = [], N = 800;
+  for (let i = 0; i <= N; i++){ const t = t0 + span*i/N; sx.push(t); sy.push(kin(P.r, P.l, calib.ph + w*t).x + calib.off); }
+  drawChart($('caPlot'), {title:`位置:仿真(蓝线)vs 实测(橙点)   RMS = ${f(calib.err.rms, 4)} mm`, ylabel:'x [mm]', xlabel:'时间 t [s]', xmin:t0, xmax:t1 > t0 ? t1 : t0 + 1,
+    series:[{x:sx, y:sy, color:'#2563eb'}], points:[{x:calib.t, y:calib.x, color:'rgba(234,88,12,.8)', r:2.2}], legend:[{t:'仿真', c:'#2563eb'}, {t:'实测', c:'#ea580c'}], xticks:8});
+  drawChart($('caRes'), {title:'残差 = 实测 − 仿真 [mm]', ylabel:'误差 [mm]', xlabel:'时间 t [s]', xmin:t0, xmax:t1 > t0 ? t1 : t0 + 1,
+    series:[{x:calib.t, y:calib.err.e, color:'#dc2626', width:1.2}], zero:true, xticks:8, annotate:0, xfmtAnn:v => f(v, 3) + 's'});
+}
+function demoData(){
+  const w = omega(), n = 240, dur = 2*(2*Math.PI/w), rows = ['time_s,position_mm'];
+  let seed = 12345; const rnd = () => (seed = (seed*1664525 + 1013904223) >>> 0)/4294967296;
+  const gauss = () => Math.sqrt(-2*Math.log(rnd() + 1e-12))*Math.cos(2*Math.PI*rnd());
+  // 模拟"真实"装置:r、l 略有偏差 + 相位 + 噪声
+  const rT = P.r*1.015, lT = P.l*0.99, ph = 0.35;
+  for (let i = 0; i < n; i++){ const t = dur*i/(n - 1); rows.push(t.toFixed(5) + ',' + (kin(rT, lT, ph + w*t).x + 0.25*gauss()).toFixed(4)); }
+  return rows.join('\n') + '\n';
+}
+function initCalib(){
+  $('caLoad').onclick = () => $('caFile').click();
+  $('caFile').onchange = async e => { const file = e.target.files[0]; if (file) loadMeasured(await file.text()); e.target.value = ''; };
+  $('caDemo').onclick = () => { if (!valid) return; $('caTU').value = '1'; $('caPU').value = '1'; $('caPhase').value = 0; $('caOff').value = 0; $('caAutoOff').checked = false; loadMeasured(demoData()); };
+  $('caTpl').onclick = () => valid && download('measured-demo.csv', demoData(), 'text/csv');
+  $('caAuto').onclick = autoAlign;
+  $('caClear').onclick = () => { calib = null; updateCalib(); $('caPlot').getContext('2d').clearRect(0, 0, 1e5, 1e5); $('caRes').getContext('2d').clearRect(0, 0, 1e5, 1e5); };
+  for (const id of ['caPhase', 'caOff', 'caAutoOff']) $(id).oninput = updateCalib;
+  const reparse = () => { if (calib){ const m = parseMeasured(calib.raw); if (m.t.length >= 2) calib = m; updateCalib(); } };
+  $('caTU').onchange = reparse; $('caPU').onchange = reparse;
+}
+
+/* ================= 启动 ================= */
+window.addEventListener('error', e => { const el = document.createElement('div'); el.className = 'status bad'; el.textContent = '脚本错误:' + e.message; document.querySelector('header').after(el); });
+buildParamRows(PARAMS, $('paramRows'));
+buildParamRows(DIMS, $('dimRows'));
+buildTiles(); bindControls(); initSweepUI(); initExport(); initCalib();
+syncAllInputs();
+requestAnimationFrame(frame);
+window.__mech = {P, kin, dyn, computeCurves, statsOf, buildSVG, simCSV, designJSON, bomRows, loadMeasured, autoAlign, runSweep, get state(){ return {theta, running, valid, calib, sweep}; }, setParam};
+</script>
+</body>
+</html>
