@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>机械结构虚拟试验台 3D - 自由装配</title><style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC","WenQuanYi Micro Hei",system-ui,sans-serif;font-size:13px;color:#1f2937;background:#e5e7eb;overflow:hidden}
+#app{display:flex;flex-direction:column;height:100%}
+#topbar{display:flex;align-items:center;gap:6px;padding:6px 8px;background:#111827;color:#e5e7eb;flex-wrap:wrap;min-height:46px}
+#topbar h1{font-size:15px;margin:0 10px 0 0;font-weight:600;color:#fff;white-space:nowrap}
+#topbar .sep{width:1px;height:24px;background:#374151;margin:0 2px}
+button,select,input{font-family:inherit;font-size:13px}
+.tb{background:#374151;color:#f3f4f6;border:1px solid #4b5563;border-radius:5px;padding:5px 8px;cursor:pointer;white-space:nowrap}
+.tb:hover:not(:disabled){background:#4b5563}
+.tb:disabled{opacity:.4;cursor:default}
+.tb.run{background:#16a34a;border-color:#15803d;color:#fff;font-weight:600}
+.tb.run:hover:not(:disabled){background:#15803d}
+.tb.pause{background:#d97706;border-color:#b45309;color:#fff}
+.tb.reset{background:#dc2626;border-color:#b91c1c;color:#fff}
+.tb.on{background:#2563eb;border-color:#1d4ed8}
+#topbar select{background:#374151;color:#f3f4f6;border:1px solid #4b5563;border-radius:5px;padding:5px 6px}
+#topbar label{display:flex;align-items:center;gap:4px;color:#d1d5db;white-space:nowrap}
+#modeBadge{padding:3px 10px;border-radius:12px;font-weight:600;font-size:12px;background:#2563eb;color:#fff;white-space:nowrap}
+#modeBadge.run{background:#16a34a}#modeBadge.pause{background:#d97706}
+#main{display:flex;flex:1;min-height:0}
+#left{width:262px;flex:none;display:flex;flex-direction:column;border-right:1px solid #d1d5db;background:#f9fafb;min-height:0}
+#palette{flex:0 1 auto;max-height:64%;overflow-y:auto;padding:6px 8px;min-height:120px}
+#palette .pal{grid-template-columns:1fr 1fr 1fr;gap:4px}#palette .item{font-size:11px;padding:4px 1px;line-height:1.15;gap:3px}#palette h3{margin:6px 0 4px}
+#palSearch,#olSearch{width:100%;padding:4px 7px;border:1px solid #cbd5e1;border-radius:5px;background:#fff;margin-bottom:2px}
+#outliner{flex:1 1 auto;display:flex;flex-direction:column;border-top:2px solid #cbd5e1;min-height:0;padding:6px 8px 4px}
+#outliner.min{flex:0 0 auto}#outliner.min #olBody{display:none}
+#olHead{display:flex;align-items:center;gap:6px;font-size:12px;color:#374151;font-weight:700;margin-bottom:4px;cursor:default}
+#olHead #olToggle{cursor:pointer;color:#6b7280;width:14px}#olCount{background:#e5e7eb;border-radius:8px;padding:0 6px;font-weight:600;color:#4b5563}
+#olBody{display:flex;flex-direction:column;flex:1;min-height:0}
+#olList{flex:1;overflow-y:auto;margin-top:4px;font-size:12px;user-select:none}
+.olg{display:flex;align-items:center;gap:4px;padding:3px 2px;margin-top:4px;color:#334155;font-weight:700;cursor:pointer;border-bottom:1px solid #e5e7eb}
+.olgn{margin-left:auto;font-weight:400;color:#94a3b8;font-size:11px}
+.olbox{padding-left:8px}
+.olr{display:flex;align-items:center;gap:4px;padding:2px 3px;border-radius:4px;cursor:pointer;white-space:nowrap}
+.olr:hover{background:#eff6ff}.olr.sel{background:#dbeafe;box-shadow:inset 2px 0 0 #2563eb}
+.olr.hid .oln,.olr.hid .oli{opacity:.4}.olr.lck .oln{font-style:italic}
+.olc{width:10px;color:#94a3b8;flex:none;font-size:10px}.oli{width:14px;text-align:center;flex:none;font-size:12px}
+.oln{flex:1;overflow:hidden;text-overflow:ellipsis}.olj{color:#64748b;font-size:10px;flex:none}
+.olb{flex:none;opacity:.35;font-size:11px;width:15px;text-align:center}.olr:hover .olb,.olr.hid .ole,.olr.lck .oll{opacity:1}.old:hover{color:#dc2626}
+.olsub{padding-left:22px;color:#475569}.olsub .jdot{flex:none}
+.olin{flex:1;min-width:0;font-size:12px;padding:0 3px;border:1px solid #2563eb;border-radius:3px}
+#palette h3,#side h3{margin:8px 0 6px;font-size:12px;color:#6b7280;font-weight:600;letter-spacing:1px}
+.pal{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.item{background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:4px 2px 3px;text-align:center;cursor:grab;user-select:none;touch-action:none;font-size:12px}
+.item:hover{border-color:#2563eb;background:#eff6ff}
+.item.armed{border-color:#2563eb;background:#dbeafe;box-shadow:0 0 0 2px #93c5fd}
+.item canvas{display:block;margin:0 auto 2px}
+.tools{display:flex;flex-direction:column;gap:5px}
+.tool{display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:5px 7px;cursor:pointer;text-align:left}
+.tool:hover{border-color:#2563eb}
+.tool.sel{background:#2563eb;color:#fff;border-color:#1d4ed8}
+.tool canvas{flex:none}
+.tool small{opacity:.7;margin-left:auto}
+#center{flex:1;position:relative;min-width:0;background:#f8fafc}
+#cv{position:absolute;left:0;top:0;width:100%;height:100%;display:block;touch-action:none;cursor:default}
+#hint{position:absolute;left:10px;bottom:8px;background:rgba(17,24,39,.82);color:#fff;padding:5px 10px;border-radius:5px;pointer-events:none;max-width:70%}
+#warn{position:absolute;right:10px;top:8px;background:#fee2e2;color:#991b1b;padding:4px 10px;border-radius:5px;display:none;border:1px solid #fca5a5}
+#energy{position:absolute;left:10px;top:8px;background:rgba(255,255,255,.9);border:1px solid #d1d5db;border-radius:6px;padding:5px 9px;font-size:12px;line-height:1.55;display:none;font-variant-numeric:tabular-nums}
+#side{width:290px;background:#f9fafb;border-left:1px solid #d1d5db;overflow-y:auto;padding:8px 10px;flex:none}
+#side .row{display:flex;align-items:center;gap:6px;margin:4px 0}
+#side .row label{width:92px;color:#4b5563;flex:none}
+#side .row label.scrub{cursor:ew-resize;text-decoration:underline dotted #9ca3af}
+#side .row input[type=number],#side .row select,#side .row input[type=text]{flex:1;min-width:0;padding:3px 5px;border:1px solid #cbd5e1;border-radius:4px;background:#fff}
+#side .row .u{width:34px;color:#9ca3af;font-size:11px;flex:none}
+#side button.del{background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;border-radius:5px;padding:4px 10px;cursor:pointer;margin-top:6px}
+#side .title{font-weight:700;font-size:14px;margin-bottom:4px}
+#readout{background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:6px 8px;font-size:12px;line-height:1.6;font-variant-numeric:tabular-nums;margin-top:8px;display:none}
+#readout b{color:#111827}
+#side.run{display:flex;flex-direction:column}#side.run h3,#side.run #props{order:3}#side.run #readout{order:1;margin-top:0}#side.run #plot{order:2}
+#plot{width:100%;height:150px;background:#fff;border:1px solid #d1d5db;border-radius:6px;margin-top:8px;display:none}
+#status{background:#111827;color:#9ca3af;padding:3px 10px;font-size:12px;display:flex;gap:16px;flex:none}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:#6b7280;margin-top:6px}
+.key{display:inline-block;background:#e5e7eb;border-radius:3px;padding:0 4px;margin:0 1px}
+#ghost{position:fixed;pointer-events:none;z-index:99;opacity:.85;display:none}
+
+.item{padding:6px 2px;display:flex;align-items:center;justify-content:center;gap:4px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;border:1px solid #9ca3af}
+.tool{padding:4px 7px;font-size:12px}
+#views{position:absolute;right:10px;top:8px;display:flex;gap:4px}
+#views button{background:rgba(255,255,255,.92);border:1px solid #cbd5e1;border-radius:5px;padding:3px 8px;cursor:pointer;font-size:12px}
+#views button.on{background:#2563eb;color:#fff}
+button.small{background:#e5e7eb;border:1px solid #cbd5e1;border-radius:4px;padding:3px 8px;cursor:pointer;margin:3px 2px}
+.jl{background:#fff;border:1px solid #e5e7eb;border-radius:4px;padding:3px 6px;margin:3px 0;cursor:pointer;font-size:12px}.jl:hover{border-color:#2563eb}
+.hint2{color:#6b7280;font-size:11px;margin:4px 0}
+#side .row input[type=number]{width:0}
+#warn{top:40px}
+#tipbar{position:absolute;left:50%;transform:translateX(-50%);top:8px;background:#fffbeb;border:1px solid #fcd34d;color:#78350f;padding:5px 30px 5px 12px;border-radius:6px;font-size:13px;max-width:calc(100% - 330px);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+#tipClose{position:absolute;right:8px;top:4px;cursor:pointer;color:#92400e}
+#snapRing{position:absolute;border:2px dashed #94a3b8;border-radius:50%;pointer-events:none;display:none}
+#snapRing.on{border:2px solid #f59e0b;background:rgba(250,204,21,.15)}
+#snapLbl{position:absolute;pointer-events:none;display:none;background:#334155;color:#fff;padding:3px 8px;border-radius:5px;font-size:13px;font-weight:600;white-space:nowrap}
+#snapLbl.on{background:#f59e0b;color:#111827}#snapLbl.ok{background:#16a34a;color:#fff}
+#advTools summary{cursor:pointer;font-size:12px;color:#6b7280;font-weight:600;margin:10px 0 6px}
+button.small.run{background:#16a34a;color:#fff;border-color:#15803d}
+
+#ctx{position:absolute;display:none;z-index:50;background:#fff;border:1px solid #cbd5e1;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.18);padding:4px 0;min-width:170px;font-size:13px}
+#ctx .ch{font-weight:700;padding:4px 10px;color:#1e293b;border-bottom:1px solid #e5e7eb}#ctx .ch2{padding:4px 10px 2px;color:#64748b;font-size:11px}
+#ctx .ci{padding:4px 16px;cursor:pointer}#ctx .ci:hover{background:#2563eb;color:#fff}
+.jcard{background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:5px 6px;margin:5px 0;font-size:12px}.jcard:hover{border-color:#93c5fd}
+.jhead{display:flex;align-items:center;gap:5px}.jhead select{font-size:12px}.jwith{color:#475569;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jmod{background:#fef3c7;color:#92400e;border-radius:4px;padding:0 4px;font-size:11px}
+.jdot{width:9px;height:9px;border-radius:50%;display:inline-block;background:#999}.t-revolute{background:#f97316}.t-prismatic{background:#10b981}.t-fixed{background:#6366f1}.t-spherical{background:#ec4899}.t-helical{background:#a855f7}.t-gear{background:#eab308}
+.jrow{display:flex;align-items:center;gap:4px;margin:3px 0;flex-wrap:wrap}.jrow label{width:58px;color:#6b7280}.jrow input[type=number]{width:58px}.jrow .u{color:#9ca3af}.jrow label.inl{width:auto}
+.jaxv{color:#9ca3af;font-size:11px}.jdet summary{cursor:pointer;color:#2563eb;margin:3px 0}.jbtns button{margin-top:3px}
+</style></head>
+<body><div id="app">
+<div id="topbar">
+<h1>机械结构虚拟试验台 3D</h1><span id="modeBadge">编辑模式</span>
+<button class="tb run" id="btnRun" title="运行 / 继续 (Space)">▶ 运行</button>
+<button class="tb pause" id="btnPause" title="暂停 (Space)" disabled>⏸ 暂停</button>
+<button class="tb reset" id="btnReset" title="重置：回到初始状态并进入编辑模式" disabled>⟲ 重置</button>
+<button class="tb" id="btnSetInit" title="把当前布局设为初始状态（编辑模式下初始状态自动跟随编辑）">设为初始状态</button>
+<button class="tb" id="btnSetInitRun" title="把暂停时的姿态冻结为新的初始状态（速度清零）" disabled>将当前运行状态设为初始状态</button>
+<span class="sep"></span>
+<label><input type="checkbox" id="chkGravity" checked> 重力</label>
+<label>速度 <select id="selSpeed"><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+<label title="拖动零件靠近连接点自动建立铰链/啮合/滑动副等；按住 Alt 临时关闭"><input type="checkbox" id="chkAuto" checked> 自动连接</label>
+<label><input type="checkbox" id="chkSnap" checked> 吸附</label>
+<button class="tb on" id="btnMove" title="移动 (W)">✥ 移动</button><button class="tb" id="btnRot" title="旋转 (E)">⟳ 旋转</button>
+<span class="sep"></span>
+<button class="tb" id="btnUndo" title="撤销 (Ctrl+Z)">↶ 撤销</button><button class="tb" id="btnRedo" title="重做 (Ctrl+Y)">↷ 重做</button>
+<span class="sep"></span>
+<label>预设 <select id="selPreset"><option value="">载入示例装配…</option></select></label>
+<button class="tb" id="btnClear">清空</button><button class="tb" id="btnFit" title="适应视图 (F)">⛶ 适应</button>
+<span class="sep"></span>
+<button class="tb" id="btnSave" title="保存 JSON (Ctrl+S)">保存</button><button class="tb" id="btnLoad">读取</button>
+<button class="tb" id="btnBom">导出BOM</button><button class="tb" id="btnPng">导出PNG</button>
+<input type="file" id="fileIn" accept=".json,application/json" style="display:none">
+</div>
+<div id="main">
+<div id="left"><div id="palette">
+<input id="palSearch" type="search" placeholder="🔍 搜索零件（Enter 选中第一个）">
+<h3 id="recentHdr">最近使用</h3><div class="pal" id="palRecent"></div>
+<h3 id="basicHdr">零件库（拖到场景）</h3><div class="pal" id="palItems"></div>
+<h3 id="transHdr">传动零件</h3><div class="pal" id="palTrans"></div><div class="hint2" id="palNone" style="display:none">没有匹配的零件</div>
+<details id="advTools"><summary>高级：手动连接工具</summary><div class="hint2">一般无需使用：直接把零件拖到连接点即可自动装配。</div><div class="tools" id="palTools"></div></details>
+<div class="legend"><span><span class="key">Space</span>运行/暂停</span><span><span class="key">Del</span>删除</span><span><span class="key">Esc</span>取消</span><span><span class="key">W</span>移动</span><span><span class="key">E</span>旋转</span><span><span class="key">Ctrl+Z/Y</span>撤销重做</span><span><span class="key">Ctrl+D</span>复制</span><span><span class="key">R</span>旋转15°</span><span><span class="key">F</span>聚焦/适应</span><span><span class="key">中键</span>旋转视角</span><span><span class="key">右键拖</span>平移</span></div>
+</div>
+<div id="outliner"><div id="olHead"><span id="olToggle" title="折叠/展开">▾</span>组件<span id="olCount">0</span><span style="margin-left:auto;font-weight:400;color:#94a3b8;font-size:11px">Ctrl/Shift 多选</span></div>
+<div id="olBody"><input id="olSearch" type="search" placeholder="🔍 筛选组件"><div id="olList"></div></div></div></div>
+<div id="center"><canvas id="cv"></canvas><div id="tipbar">💡 拖动零件靠近连接点即可自动装配（Alt 自由放置）。<b>中键拖动=旋转视角</b>（在零件上也可）· 右键拖动=平移 · 滚轮=缩放 · 左键=选择/拖动零件 · 拖动零件时滚轮=旋转零件 15° · 选中后 R 旋转 15°（Shift+R 反向）<span id="tipClose" title="关闭">✕</span></div><div id="snapRing"></div><div id="ctx"></div><div id="snapLbl"></div><div id="energy"></div><div id="warn"></div>
+<div id="views"><button data-view="front">前视</button><button data-view="top">俯视</button><button data-view="side">侧视</button><button data-view="iso">轴测</button></div>
+<div id="hint">中键拖动=旋转视角 · 右键拖动=平移 · 滚轮=缩放 · 左键=选择/拖动零件 · R：旋转选中零件</div></div>
+<div id="side"><h3>属性</h3><div id="props"></div><div id="readout"></div><canvas id="plot" width="540" height="300"></canvas></div>
+</div>
+<div id="status"><span id="stMsg">加载中…</span><span id="stInfo"></span></div>
+</div><div id="ghost" style="background:#2563eb;color:#fff;padding:3px 8px;border-radius:4px"></div>
+<script>/*APP*/</script></body></html>

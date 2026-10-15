@@ -1,0 +1,17 @@
+{
+  "name": "build",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "esbuild": "^0.28.2",
+    "three": "^0.186.1"
+  }
+}
