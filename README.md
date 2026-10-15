@@ -10,7 +10,34 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - `build/src/presets.js` – 14 presets (incl. 三轮车), all built from the same free parts
 - `build/src/app.js` – UI, scene, gizmo, tools, run/pause/reset/initial state, undo/redo, IO
 - `build/template.html`, `build/build.sh` – to rebuild: `cd build && npm ci && ./build.sh`
-- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 83 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events
+- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 112 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search)
+
+## 鼠标与键盘操作
+| 操作 | 作用 |
+|---|---|
+| 中键拖动（任意位置，包括零件上） | 旋转视角 |
+| 左键拖动空白处 | 旋转视角 |
+| 左键拖动零件 | 移动零件（自动装配 / 按约束运动）|
+| 右键拖动 | 平移视角 |
+| 右键单击零件 / 连接标记（不拖动） | 右键菜单 |
+| 滚轮（未拖动零件） | 缩放 |
+| 拖动零件时滚轮 | 旋转零件 15°/格；Shift/Ctrl+滚轮切换旋转轴（视角→X→Y→Z）|
+| R / Shift+R | 选中零件旋转 +15° / −15° |
+| W / E | 坐标轴：移动 / 旋转 |
+| F | 有选中零件时聚焦到该零件，否则适应视图 |
+| Tab（拖动吸附时） | 切换连接类型 |
+| Space / Del / Esc / Ctrl+Z·Y / Ctrl+D / Ctrl+S | 运行暂停 / 删除（多选时删除全部）/ 取消 / 撤销重做 / 复制 / 保存 |
+
+## 左侧栏：零件库 + 组件栏
+- **零件库**：顶部搜索框（输入“轴承”“齿”等即时筛选，Enter 选中第一个后点击场景放置，Esc 清空）；“最近使用”一行显示最近放置的 6 种零件（保存在浏览器 localStorage）；基础零件（含轴承座、转向叉）和传动零件全部以三列平铺显示，无需滚动。
+- **组件栏**（零件库下方，▾ 可折叠）：列出场景中所有零件，按装配体分组（通过连接/传动相连的零件归为“装配体 N”，显示零件数和连接数；单独的零件在“未连接零件”中）。每行：类型图标（材料颜色）、名称、🔗连接数、👁 隐藏/显示、🔒 锁定、✕ 删除。
+  - 单击：选中（3D 高亮 + 属性面板）；Ctrl+单击 / Shift+单击：多选（Del 删除全部）；单击装配体标题：选中整个装配体
+  - 双击名称：改名（Enter 确认，Esc 取消）；双击图标或行的其他位置：视角聚焦到该零件
+  - 悬停：3D 中橙色高亮该零件
+  - ▸：展开该零件的连接/传动列表，单击连接即选中并在属性面板编辑
+  - 隐藏的零件不能被点选，但仍参与物理仿真；锁定的零件可选中、可改属性，但不能拖动/旋转（不显示坐标轴）
+  - 在 3D 中选中零件时，对应行高亮并自动滚动到可见；添加、删除、撤销/重做、读取、载入示例后自动同步
+- 新零件自动命名为“类型 序号”（如 轮 1、电机 2）。
 
 ## 直接装配（自动连接）
 拖动零件（从零件库拖入，或直接用鼠标拖动场景里的零件）靠近另一零件的连接点时，会显示预览：半透明零件、目标点圆圈和将要建立的连接类型（如“铰链”）。松开后零件精确对位，并自动建立连接（一次撤销即可撤回）。按住 **Alt**，或关闭工具栏上的“自动连接”，可以自由放置。
@@ -53,7 +80,9 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 
 ## 旋转零件
 - 拖动（零件库或场景中）时 **滚轮** 每格旋转 15°，绕当前视角方向的坐标轴；**Shift+滚轮 / Ctrl+滚轮** 切换旋转轴（视角 → X → Y → Z），标签显示轴和角度。带铰链的零件绕铰链转动。
-- **中键按住零件拖动** = 自由旋转（15° 吸附，按住 Shift 精细）；带铰链的零件绕铰链转动、连接不脱开。中键拖空白处仍是相机操作。
+- **R 键**：选中零件后每按一次旋转 15°（**Shift+R** 反向），绕属性面板“旋转 15°”中选择的轴（视角轴 / X / Y / Z，与滚轮旋转共用）；带铰链的零件绕铰链转动、连接不脱开。属性面板也有 −15° / +15° 按钮。
+- **E 键**：坐标轴切换为旋转模式（15° 吸附）。
+- 中键不再旋转零件：中键拖动（包括在零件上）始终是旋转视角。
 - 吸附时自动转向：孔/轴的轴线自动对齐（轮→任意方向的轴、连杆→轴销、齿轮→倾斜的电机轴均已测试）。
 
 ## 手工搭三轮车（全部拖拽）
@@ -74,3 +103,5 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - 转向叉是被动转向（带回正），没有方向盘/舵机控制；可用连接的“驱动”或“限位”锁定。
 - 两个对置电机默认转向相反，需要对其中一个“反转轴”（三轮车示例已设置）。
 - 右键菜单最多列出 5 个连接，更多请用属性面板。
+- 隐藏/锁定状态保存在模型 JSON 中，但本身不产生撤销步骤；隐藏零件的连接标记仍显示。
+- 组件栏的分组按“是否有连接/传动”划分，不能手动建立自定义分组或拖动排序。
