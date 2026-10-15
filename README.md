@@ -7,10 +7,11 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - `index.html` – the built app (everything inlined)
 - `build/src/parts.js` – part library: geometry (gear teeth, helix threads, lathe pulleys…), colliders, connection points, materials
 - `build/src/physics.js` – Rapier world builder: rigid groups (parts joined by 固定连接 become one body), revolute/prismatic/spherical joints with exact local frames, motors, springs and dampers, a velocity-level coupling solver for gears/belts/chains/screws/gearbox/clutch, an edit-mode relaxation solver, and joint gap/energy measurement
+- `build/src/resize.js` – resizing a part while keeping every connection matched (anchor remapping, anchored-side settling, gear-mesh repositioning, relaxation, feasibility check)
 - `build/src/presets.js` – 14 presets (incl. 三轮车), all built from the same free parts
 - `build/src/app.js` – UI, scene, gizmo, tools, run/pause/reset/initial state, undo/redo, IO
 - `build/template.html`, `build/build.sh` – to rebuild: `cd build && npm ci && ./build.sh`
-- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 112 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search)
+- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 140 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search); `tests/resize.js` (尺寸修改后连接保持贴合)
 
 ## 鼠标与键盘操作
 | 操作 | 作用 |
@@ -105,3 +106,20 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - 右键菜单最多列出 5 个连接，更多请用属性面板。
 - 隐藏/锁定状态保存在模型 JSON 中，但本身不产生撤销步骤；隐藏零件的连接标记仍显示。
 - 组件栏的分组按“是否有连接/传动”划分，不能手动建立自定义分组或拖动排序。
+
+## 修改尺寸（连接自动保持贴合）
+在属性面板修改任何尺寸（轴/丝杠/蜗杆的长度和半径、连杆孔距/宽/厚、板的长宽厚、轮/齿轮/带轮/链轮的半径·齿数·模数、滑块、底座、轴承座、电机等）后，所有连接点会自动重新计算并重新对齐，不会留下间隙（最大间隙 < 0.5 mm，否则拒绝修改）。
+- **实时预览**：输入数字时、按住微调箭头时、或**左右拖动尺寸名称标签**（虚线下划线，光标 ↔）时，场景实时更新；回车/失去焦点/松开鼠标时提交，**每次修改只占一个撤销步**（Ctrl+Z 恢复尺寸和所有零件的位置）。
+- **连接点如何随尺寸移动**
+  - 位于命名连接点上的（轴端、连杆端孔、中心、轮缘、电机输出轴、轴承座轴孔/底面、板端点…）→ 移到新尺寸下的同一个连接点。
+  - 位于零件表面上的（例如板顶面上的电机/轴承座）→ 仍在该表面上，水平偏移保持不变，但夹紧在新的板面范围内。
+  - 轴、丝杠、蜗杆、连杆、齿条、从动件沿长度方向的中间位置（例如轴上中间的轮）→ 保持到最近一端的距离（在中心的保持居中），并夹紧在新长度内。
+  - 铰链销沿自身轴线的位置（例如连杆厚度方向）在必要时保持不变，避免闭环机构在厚度方向错位。
+- **哪一侧移动**：固定于大地的零件（以及与大地直接相连的连接）保持不动；被修改的零件和与之相连的自由零件按连接逐个平移，使每个连接重新重合，然后用编辑模式的约束求解（松弛）闭合剩余的环路（例如四连杆会重新求解姿态）。
+  - 轴承座固定、轴另一端装轮：改轴长时轴承端不动，轮随轴的另一端移动。
+  - 轴支承在**两个固定**的轴承座之间：轴以自身中心两端伸长/缩短，轴承座不动，轴端上的零件随端部移动；缩短到小于两轴承座跨距则无法装配 → 拒绝。
+  - 一个轴承座固定、另一个自由：自由的轴承座随轴端移动。
+  - 落在地面上的固定零件（底座、地面）改高度时底面保持在地面上；自由装配体改尺寸后若穿入地面会整体抬起。
+- **齿轮啮合**：改齿数/模数（或蜗杆节圆半径、齿条高度）后，啮合的另一侧移动到精确的新中心距（优先移动对方齿轮所在的、可移动的一侧，连同其轴；其在固定箱体上的安装孔随之移动；多级齿轮会依次联动），直齿轮重新对齿相位；传动比按新几何重新计算。皮带/链条的长度自动随带轮位置/半径更新，速比同步更新。
+- **无法装配时**：例如四连杆改成无法闭合的连杆长度，会提示“无法修改 … 的尺寸：修改后连接无法全部重新对齐（最大间隙 x mm，机构在该尺寸下无法装配），已恢复原尺寸。可先拆开一个连接再修改。”，模型保持不变、无间隙。
+- 限制：锥齿轮改尺寸后啮合位置不自动调整（会提示）；两个零件模数不同仍会放到节圆相切的位置但会提示“模数不同”；被一根刚性轴跨接的两个固定支承（如小车前轴两轴承座）不能单独改其中一个的中心高或把板缩到小于跨距（拒绝修改）；场景中没有专门的拉伸手柄，尺寸修改通过属性面板（输入、微调箭头或拖动标签）。
