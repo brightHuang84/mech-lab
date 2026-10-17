@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { buildGenericCar } from './examples.js';
 const D2R = Math.PI / 180;
 // api: P(type, pos, eulerDeg|quat, over) -> part ; J(type, A, B|null, anchor, axis, over) ; C(type, A, B, extra) ; rod(p1,p2,over)
 function circInter(p0, r0, p1, r1, upper) {
@@ -170,6 +171,7 @@ export const PRESETS = [
     const fw = P('wheel', [xk - 0.1, R, 0], null, { name: '前轮', d: { r: R, t: tw } });
     J('revolute', fk, fw, [xk - 0.1, R, 0], Zx);
   } },
+  { name: '四轮小车(通用零件装配)', app: true, desc: '只用板/滑块/轮 + 配合工具装配：滑动副+弹簧阻尼=悬架，铰链舵机=转向(A/D)，铰链电机=后驱(W/S)；左侧装好后镜像复制到右侧。运行后按 W/S/A/D 驾驶', build(app) { buildGenericCar(app); app.placePart('wall', { x: 0.9, y: 0, z: 0 }, { name: '减速带', d: { w: 0.04, h: 0.012, dp: 0.6 } }); } },
   { name: '投石机', desc: '配重下落带动长臂，把石块抛出（铰链+固定连接+碰撞）', build({ P, J, rod }) {
     const piv = [0, 0.75, 0], ang = -140 * D2R, dir = [Math.cos(ang), Math.sin(ang), 0], Ll = 0.7, Ls = 0.3;
     const longEnd = [piv[0] + dir[0] * Ll, piv[1] + dir[1] * Ll, 0], shortEnd = [piv[0] - dir[0] * Ls, piv[1] - dir[1] * Ls, 0];

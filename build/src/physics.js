@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
-import { DEFS, MATS, shapeVolume, pitchRadius } from './parts.js';
+import { DEFS, MATS, shapeVolume, pitchRadius, geoData } from './parts.js';
 export { RAPIER };
 
 export const V3 = a => new THREE.Vector3(a[0], a[1], a[2]);
@@ -87,7 +87,9 @@ export class Sim {
           else if (s.k === 'cyl') { cd = RAPIER.ColliderDesc.cylinder(s.hh, s.r); sq = qZY.clone(); }
           else if (s.k === 'ball') cd = RAPIER.ColliderDesc.ball(s.r);
           else if (s.k === 'cap') cd = RAPIER.ColliderDesc.capsule(s.hh, s.r);
-          else if (s.k === 'hull') cd = RAPIER.ColliderDesc.convexHull(s.pts);
+          else if (s.k === 'hull') cd = RAPIER.ColliderDesc.convexHull(new Float32Array(s.pts));
+          else if (s.k === 'tri') { const c = geoData(s.gid); if (c) { const v = new Float32Array(c.pos.length); for (let i = 0; i < v.length; i++) v[i] = c.pos[i] * s.sc; cd = RAPIER.ColliderDesc.trimesh(v, c.idx); } }
+          if (!cd) { cd = RAPIER.ColliderDesc.ball(0.01); }
           const sp = V3(s.pos || [0, 0, 0]).applyQuaternion(oq).add(op);
           cd.setTranslation(sp.x, sp.y, sp.z).setRotation(rq(oq.clone().multiply(sq)));
           cd.setMass(Math.max(1e-4, p.mass) * shapeVolume(s) / vt).setFriction(p.mu != null ? p.mu : mt.mu).setRestitution(p.e != null ? p.e : mt.e);
@@ -109,7 +111,7 @@ export class Sim {
       filterIntersectionPair() { return true; }
     };
     // joints
-    this.rj = []; this.forces = []; this.motors = []; this.couplings = []; this.helix = [];
+    this.rj = []; this.drives = []; this.forces = []; this.motors = []; this.couplings = []; this.helix = [];
     for (const j of M.joints) {
       if (j.type === 'fixed') continue;
       const PA = M.parts.find(p => p.id === j.a), PB = j.b != null ? M.parts.find(p => p.id === j.b) : null;
@@ -157,11 +159,33 @@ export class Sim {
     if (this.edit) return;
     const isMotorJ = (PA.type === 'motor' || (PB && PB.type === 'motor')) && j.type === 'revolute' && !j.noMotor;
     try {
-      if (j.drive && j.drive.on) { ij.configureMotorModel(RAPIER.MotorModel.ForceBased); ij.configureMotorVelocity(j.drive.v || 0, 1e4); ij.setMotorMaxForce(j.drive.maxF != null ? j.drive.maxF : 10); rec.drive = j.drive; }
+      if (j.drive && j.drive.on) { ij.configureMotorModel(RAPIER.MotorModel.ForceBased); rec.drive = j.drive; rec.dkey = null; this.drives.push(rec); this.applyDrive(rec); }
       else if (isMotorJ) return;
-      else if ((j.kc || 0) > 0 || (j.damp || 0) > 0) { ij.configureMotorModel(RAPIER.MotorModel.ForceBased); ij.configureMotor(0, 0, j.kc || 0, j.damp || 0); ij.setMotorMaxForce(1e6); }
+      else if ((j.kc || 0) > 0 || (j.damp || 0) > 0) { ij.configureMotorModel(RAPIER.MotorModel.ForceBased); ij.configureMotor(j.rest || 0, 0, j.kc || 0, j.damp || 0); ij.setMotorMaxForce(1e6); }
       else if ((j.fric || 0) > 0) { ij.configureMotorModel(RAPIER.MotorModel.ForceBased); ij.configureMotorVelocity(0, 1e3); ij.setMotorMaxForce(j.fric); }
     } catch (e) { }
+  }
+  /** keyboard input of a joint drive: null = no keys bound (always on), else -1 / 0 / +1 */
+  driveInput(D) { if (!D.keyP && !D.keyN) return null; const K = this.keys || new Set(); return (K.has(D.keyP) ? 1 : 0) - (K.has(D.keyN) ? 1 : 0); }
+  /** built-in joint motor: speed / torque / servo (position) mode, optionally key-controlled */
+  applyDrive(rec) {
+    const D = rec.drive, ij = rec.ij, inp = this.driveInput(D), rv = rec.j.type === 'revolute', mode = D.mode || 'speed', maxF = D.maxF != null ? D.maxF : 10;
+    let key;
+    if (mode === 'servo') {
+      const goal = (D.pos || 0) * (inp == null ? 1 : inp), rate = D.rate != null ? D.rate : (rv ? 3 : 0.2);
+      if (rec.servoT == null) rec.servoT = inp == null ? goal : 0;
+      const st = rate * this.h; rec.servoT += Math.max(-st, Math.min(st, goal - rec.servoT));
+      key = 'p' + rec.servoT.toFixed(5);
+      if (key !== rec.dkey) { ij.configureMotorPosition(rec.servoT, D.kp != null ? D.kp : (rv ? 60 : 3000), D.kd != null ? D.kd : (rv ? 3 : 150)); ij.setMotorMaxForce(maxF); }
+    } else if (mode === 'torque') {
+      const u = inp == null ? 1 : inp, t = (D.tq != null ? D.tq : maxF) * u; key = 't' + t;
+      if (key !== rec.dkey) { ij.configureMotorVelocity(Math.sign(t) * 1e3, 1e4); ij.setMotorMaxForce(Math.abs(t)); }
+    } else {
+      const u = inp == null ? 1 : inp, v = (D.v || 0) * u; key = 's' + v;
+      // released keys: coast (tiny drag) unless "brake" is set
+      if (key !== rec.dkey) { ij.configureMotorVelocity(v, 1e4); ij.setMotorMaxForce(u === 0 ? maxF * (D.brake ? 1 : 0.02) : maxF); }
+    }
+    rec.dkey = key; rec.dIn = inp;
   }
   toBody(b, w) { return w.clone().sub(tv(b.translation())).applyQuaternion(tq(b.rotation()).invert()); }
   toWorld(b, l) { return l.clone().applyQuaternion(tq(b.rotation())).add(tv(b.translation())); }
@@ -211,6 +235,7 @@ export class Sim {
       if (f.bA.isDynamic()) f.bA.addForceAtPoint(rv(u.clone().multiplyScalar(F)), rv(pA), true);
       if (f.bB.isDynamic()) f.bB.addForceAtPoint(rv(u.clone().multiplyScalar(-F)), rv(pB), true);
     }
+    for (const r of this.drives) this.applyDrive(r);
     const mrows = [];
     for (const m of this.motors) {
       const n = m.nL.clone().applyQuaternion(tq(m.mb.rotation())), mo = m.part.motor || {};

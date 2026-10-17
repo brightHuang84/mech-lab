@@ -16,7 +16,7 @@ export function localBox(type, d) {
   for (const s of D.shapes(d)) {
     const c = s.pos || [0, 0, 0];
     if (s.k === 'box') add(c, s.h); else if (s.k === 'cyl') add(c, [s.r, s.r, s.hh]); else if (s.k === 'ball') add(c, [s.r, s.r, s.r]);
-    else if (s.k === 'cap') add(c, [s.r, s.hh + s.r, s.r]); else if (s.k === 'hull') for (let i = 0; i < s.pts.length; i += 3) add([s.pts[i], s.pts[i + 1], s.pts[i + 2]], [0, 0, 0]);
+    else if (s.k === 'cap') add(c, [s.r, s.hh + s.r, s.r]); else if (s.pts) for (let i = 0; i < s.pts.length; i += 3) add([s.pts[i], s.pts[i + 1], s.pts[i + 2]], [0, 0, 0]);
   }
   for (const p of D.pts(d)) add(p.p, [0, 0, 0]);
   return { mn, mx };
@@ -51,7 +51,7 @@ export function partMinY(P) {
     if (s.k === 'box') { for (let k = 0; k < 3; k++) { const ax = new THREE.Vector3(k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0).applyQuaternion(q); e += Math.abs(ax.y) * s.h[k]; } }
     else if (s.k === 'cyl' || s.k === 'cap') { const ay = new THREE.Vector3(0, 0, 1).applyQuaternion(q).y; e = s.hh * Math.abs(ay) + s.r * Math.sqrt(Math.max(0, 1 - ay * ay)) + (s.k === 'cap' ? s.r : 0); }
     else if (s.k === 'ball') e = s.r;
-    else if (s.k === 'hull') { for (let i = 0; i < s.pts.length; i += 3) lo = Math.min(lo, V3([s.pts[i], s.pts[i + 1], s.pts[i + 2]]).applyQuaternion(q).add(p).y); continue; }
+    else if (s.pts) { for (let i = 0; i < s.pts.length; i += 3) lo = Math.min(lo, V3([s.pts[i], s.pts[i + 1], s.pts[i + 2]]).applyQuaternion(q).add(p).y); continue; }
     lo = Math.min(lo, c.y - e);
   }
   return lo;

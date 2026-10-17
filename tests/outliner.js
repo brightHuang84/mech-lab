@@ -14,7 +14,7 @@ module.exports = async function (p, check, OUT) {
   const hov = await p.evaluate(id => app.hoverPid === id, pid);
   await r1.click(); await frame();
   const sel = await p.evaluate(id => ({ sel: app.sel && app.sel.p === id, rowSel: document.querySelector(`#olList .olr[data-pid="${id}"]`).classList.contains('sel'), props: document.querySelector('#props .title').textContent, gizmo: !!app.tc.object }), pid);
-  check('组件栏：悬停高亮 3D 零件，单击选中（属性面板 + 高亮行）', hov && sel.sel && sel.rowSel && /车架|：/.test(sel.props) && sel.gizmo, JSON.stringify({ hov, ...sel }));
+  check('组件栏：悬停高亮 3D 零件，单击选中（属性面板 + 高亮行，无坐标轴）', hov && sel.sel && sel.rowSel && /车架|：/.test(sel.props) && !sel.gizmo, JSON.stringify({ hov, ...sel, note: '选中不显示坐标轴' }));
   const wheel = await p.evaluate(() => app.M.parts.find(P => P.type === 'wheel').id);
   const t0 = await p.evaluate(() => ({ t: app.orbit.target.toArray(), d: app.cam.position.distanceTo(app.orbit.target) }));
   await (await row(wheel)).click({ count: 2 }); await frame();
@@ -43,9 +43,10 @@ module.exports = async function (p, check, OUT) {
   const lk0 = await p.evaluate(id => ({ p: app.part(id).p.slice(), q: app.part(id).q.slice() }), wheel);
   const wxy = await p.evaluate(id => { const s = app.toScreen(new app._V(...app.part(id).p)); return [s.x, s.y]; }, wheel);
   await p.mouse.move(wxy[0], wxy[1]); await p.mouse.down(); await p.mouse.move(wxy[0] + 80, wxy[1] + 40, { steps: 8 }); await p.mouse.up(); await frame();
-  await p.evaluate(id => app.select({ p: id }), wheel); await p.keyboard.press('KeyR'); await frame();
+  await p.evaluate(id => { app.gizmoOn = true; app.select({ p: id }); }, wheel); await p.keyboard.press('KeyR'); await frame();
   const lk1 = await p.evaluate(id => ({ p: app.part(id).p.slice(), q: app.part(id).q.slice(), locked: !!app.part(id).locked, gizmo: !!app.tc.object }), wheel);
   const lkd = lk0.p.concat(lk0.q).reduce((a, v, i) => a + Math.abs(v - lk1.p.concat(lk1.q)[i]), 0);
+  await p.evaluate(() => { app.gizmoOn = false; app.updSel(); });
   await (await p.$(`#olList .olr[data-pid="${wheel}"] .oll`)).click(); await frame();
   check('组件栏：锁定后不能拖动/旋转（无坐标轴）', lk1.locked && lkd < 1e-12 && !lk1.gizmo, JSON.stringify({ change: lkd, gizmo: lk1.gizmo }));
   // multi-select (Ctrl) + delete via button + undo sync + add sync
@@ -77,7 +78,7 @@ module.exports = async function (p, check, OUT) {
   await p.click('#palSearch'); await p.keyboard.type('轴承'); await frame();
   const ps = await p.evaluate(() => [...document.querySelectorAll('#palItems .item, #palTrans .item')].filter(x => x.style.display !== 'none').map(x => x.dataset.type));
   await p.evaluate(() => { const s = document.getElementById('palSearch'); s.value = ''; s.dispatchEvent(new Event('input')); });
-  const allT = await p.evaluate(() => { const shown = [...document.querySelectorAll('#palItems .item, #palTrans .item')].filter(x => x.offsetParent !== null).map(x => x.dataset.type); return { all: Object.keys(app.DEFS).every(t => shown.includes(t)), recent: [...document.querySelectorAll('#palRecent .item')].map(x => x.dataset.type) }; });
+  const allT = await p.evaluate(() => { const shown = [...document.querySelectorAll('#palItems .item, #palTrans .item')].filter(x => x.offsetParent !== null).map(x => x.dataset.type); return { all: Object.keys(app.DEFS).filter(t => app.DEFS[t].cat !== 'import').every(t => shown.includes(t)), recent: [...document.querySelectorAll('#palRecent .item')].map(x => x.dataset.type) }; });
   check('零件库搜索（“轴承”→轴承座）+ 全部零件类型可见 + 最近使用', ps.length === 1 && ps[0] === 'bearing' && allT.all && allT.recent[0] === 'gear', JSON.stringify({ search: ps, ...allT }));
   // screenshot with the tricycle preset
   await p.evaluate(i => { app.loadPreset(i); app.view('iso'); app.fit(); const w = app.M.parts.find(P => P.type === 'motor'); app.olOpen.add(w.id); app.renderOutliner(); app.select({ p: w.id }); }, await presetIdx('三轮车'));

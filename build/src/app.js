@@ -6,6 +6,8 @@ import { RAPIER, Sim, analyze, planCoupling, V3, Q4, ptW, axW, ptL, axL, isForce
 import { PRESETS } from './presets.js';
 import { findAssembly, connectors, SNAP_PX, JNAME } from './assemble.js';
 import { resizeModel, maxJointGap } from './resize.js';
+import { installExtra, keyLabel } from './extra.js';
+import { GEO } from './parts.js';
 
 const $ = id => document.getElementById(id);
 const tv3 = v => new THREE.Vector3(v.x, v.y, v.z), tq4 = q => new THREE.Quaternion(q.x, q.y, q.z, q.w);
@@ -17,7 +19,7 @@ function partMinY(P) {
     if (s.k === 'box') { for (let k = 0; k < 3; k++) { const ax = new THREE.Vector3(k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0).applyQuaternion(q); e += Math.abs(ax.y) * s.h[k]; } }
     else if (s.k === 'cyl' || s.k === 'cap') { const ay = new THREE.Vector3(0, 0, 1).applyQuaternion(q).y; e = s.hh * Math.abs(ay) + s.r * Math.sqrt(Math.max(0, 1 - ay * ay)) + (s.k === 'cap' ? s.r : 0); }
     else if (s.k === 'ball') e = s.r;
-    else if (s.k === 'hull') { for (let i = 0; i < s.pts.length; i += 3) lo = Math.min(lo, V3([s.pts[i], s.pts[i + 1], s.pts[i + 2]]).applyQuaternion(q).add(p).y); continue; }
+    else if (s.pts) { for (let i = 0; i < s.pts.length; i += 3) lo = Math.min(lo, V3([s.pts[i], s.pts[i + 1], s.pts[i + 2]]).applyQuaternion(q).add(p).y); continue; }
     lo = Math.min(lo, c.y - e);
   }
   return lo;
@@ -25,6 +27,7 @@ function partMinY(P) {
 const D2R = Math.PI / 180;
 const JT = { revolute: '铰链', prismatic: '滑动副', fixed: '固定连接', spherical: '球铰', helical: '螺旋副', spring: '弹簧', damper: '阻尼器' };
 const EDIT_T = ['revolute', 'prismatic', 'fixed', 'spherical', 'helical'];
+const DRIVE_N = { speed: '速度', torque: '扭矩', servo: '位置(舵机)' };
 const CT = { gear: '啮合', belt: '皮带', chain: '链条', screw: '螺旋副', gearbox: '变速箱联动', clutch: '离合器', ujoint: '万向节联动' };
 const TOOLS = [
   ['select', '选择/移动', 'V'], ['revolute', '铰链', '旋转副'], ['prismatic', '滑动副', '移动副'], ['fixed', '固定连接', '焊接'], ['spherical', '球铰', '万向'],
@@ -96,7 +99,7 @@ class App {
     this.scene.updateMatrixWorld(); this.ray.setFromCamera(this.ndc(e), this.cam);
     if (this.mode === 'edit') for (const h of this.ray.intersectObjects([this.fx], true)) { let o = h.object; while (o && o.userData.jid == null) o = o.parent; if (o) { const j = this.M.joints.find(x => x.id === o.userData.jid); if (j && !isForce(j)) return { jid: j.id, point: h.point }; } }
     const hits = this.ray.intersectObjects([this.root, this.fx, this.groundMesh], true);
-    for (const h of hits) { let o = h.object; while (o && o.userData.pid == null && o.userData.jid == null && !o.userData.ground) o = o.parent; if (!o) continue; if (o.userData.helper) continue; if (o.userData.pid && (this.part(o.userData.pid) || {}).hidden) continue; return { pid: o.userData.pid, jid: o.userData.jid, ground: !!o.userData.ground, point: h.point }; }
+    for (const h of hits) { let o = h.object; while (o && o.userData.pid == null && o.userData.jid == null && !o.userData.ground) o = o.parent; if (!o) continue; if (o.userData.helper) continue; if (o.userData.pid && (this.part(o.userData.pid) || {}).hidden) continue; let normal = null; if (h.face && o.userData.pid) { normal = h.face.normal.clone().applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(h.object.matrixWorld)).normalize(); if (normal.dot(this.ray.ray.direction) > 0) normal.negate(); } return { pid: o.userData.pid, jid: o.userData.jid, ground: !!o.userData.ground, point: h.point, normal }; }
     return { ground: true, point: this.groundPoint(e) };
   }
   groundPoint(e) { this.ray.setFromCamera(this.ndc(e), this.cam); const p = new THREE.Vector3(); return this.ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), p) ? p : new THREE.Vector3(); }
@@ -136,7 +139,7 @@ class App {
   rebuild(keepProps) {
     this.root.clear(); this.fx.clear(); this.objs = {}; this.jobjs = {}; this.cobjs = {};
     for (const P of this.M.parts) {
-      const g = DEFS[P.type].mesh(P.d, P); g.userData.pid = P.id; g.visible = !P.hidden; this.root.add(g); this.objs[P.id] = g;
+      const g = DEFS[P.type].mesh(P.d, P); g.userData.pid = P.id; g.visible = !P.hidden; this.root.add(g); this.objs[P.id] = g; this.decorate(P, g);
       g.traverse(o => { if (o.isMesh) o.userData.baseEm = o.material.emissive ? o.material.emissive.getHex() : 0; });
     }
     for (const j of this.M.joints) { const o = this.jointMarker(j); if (o) { o.userData.jid = j.id; this.fx.add(o); this.jobjs[j.id] = o; } }
@@ -222,6 +225,7 @@ class App {
   hover(e) {
     if (this.mode !== 'edit' || this.tool === 'select') { if (!this.pick1) this.hl.visible = false; return; }
     const h = this.pickAt(e);
+    if (this.tool === 'mate' || this.tool === 'addcon') { if (h.pid) { const r = this.tool === 'mate' ? this.mateRef(h) : null; this.hl.position.copy(r ? ptW(this.part(h.pid), r.p) : h.point); this.hl.scale.setScalar(0.7); this.hl.visible = true; } else this.hl.visible = false; return; }
     if (h.pid) { const pt = this.nearestPt(h.pid, h.point); this.hl.position.copy(pt.w); this.hl.visible = true; } else this.hl.visible = false;
   }
   nearestPt(pid, w) {
@@ -233,13 +237,18 @@ class App {
     if (this.armed) { const gp = this.groundPoint(e); this.placePart(this.armed, gp); this.armed = null; document.querySelectorAll('.item.armed').forEach(x => x.classList.remove('armed')); return; }
     const h = this.pickAt(e);
     if (this.mode !== 'edit' || this.tool === 'select') {
-      if (h.jid) this.select({ j: h.jid }); else if (h.pid) this.select({ p: h.pid }); else this.select(null);
+      if (h.jid) this.select({ j: h.jid });
+      else if (h.pid && (e.ctrlKey || e.metaKey || e.shiftKey) && this.mode === 'edit') { const ms = new Set(this.selIds()), g = this.groupOf(h.pid); if (ms.has(h.pid)) { g.forEach(id => ms.delete(id)); this.msel = ms; const nx = [...ms][0]; this.select(nx ? { p: nx } : null, true); } else { g.forEach(id => ms.add(id)); this.msel = ms; this.select({ p: h.pid }, true); } this.msg('已选中 ' + this.msel.size + ' 个零件（Ctrl/Shift+点击 增减；Ctrl+G 组合）'); }
+      else if (h.pid) { const g = this.groupOf(h.pid); if (g.length > 1) { this.msel = new Set(g); this.select({ p: h.pid }, true); } else this.select({ p: h.pid }); }
+      else this.select(null);
       return;
     }
     this.toolClick(h);
   }
   toolClick(h) {
     const t = this.tool, isJ = !!JT[t];
+    if (t === 'mate') return this.mateClick(h);
+    if (t === 'addcon') return this.conClick(h);
     if (!this.pick1) {
       if (!h.pid) { this.msg('请先点击第一个零件' + (isJ ? '的连接点' : '')); return; }
       const pt = this.nearestPt(h.pid, h.point); this.pick1 = { pid: h.pid, pt, w: pt.w, hit: h.point.clone() };
@@ -289,7 +298,7 @@ class App {
     let res = null;
     if (asm && asm.ray) { const r = findAssembly({ M: this.M, mover: P, p0: null, q0: Q4(P.q), ray: asm.ray, cursor: asm.cursor, exclude: new Set([P.id]), toScreen: v => this.toScreen(v), camPos: this.cam.position }); if (r.best) res = this.applyAssembly(r.best, P, [P.id]); }
     if (res) this.liftComp(P.id);
-    this.commit(); this.rebuild(); this.select({ p: P.id }); if (this.noteRecent) this.noteRecent(type);
+    this.commit(); this.rebuild(); this.select({ p: P.id }); if (this.noteRecent && type !== 'mesh') this.noteRecent(type);
     if (res) this.announce(res); else this.msg('已放置 ' + P.name + '：拖动零件靠近其它零件的连接点即可自动装配（按住 Alt 自由放置）');
     return P;
   }
@@ -338,11 +347,11 @@ class App {
     return (this._ghosts[key] = g);
   }
   /** palette drag preview: returns the snap candidate (if any) */
-  previewPalette(type, ev) {
-    const D = DEFS[type], P = { id: '__new', type, d: JSON.parse(JSON.stringify(D.d)), mat: D.mat, p: [0, 0, 0], q: [0, 0, 0, 1] };
+  previewPalette(type, ev, over) {
+    const D = DEFS[type], P = { id: '__new', type, d: Object.assign(JSON.parse(JSON.stringify(D.d)), over && over.d ? over.d : {}), mat: over && over.mat || D.mat, p: [0, 0, 0], q: [0, 0, 0, 1] };
     const g = this.ghostFor(type, P), bb = new THREE.Box3().setFromObject(DEFS[type].mesh(P.d, P)), gp = this.groundPoint(ev);
     let best = null, near = null;
-    this._palEv = { type, ev: { clientX: ev.clientX, clientY: ev.clientY, altKey: ev.altKey } }; const q0 = this.palRot || new THREE.Quaternion(); P.q = q0.toArray();
+    this._palEv = { type, over, ev: { clientX: ev.clientX, clientY: ev.clientY, altKey: ev.altKey } }; const q0 = this.palRot || new THREE.Quaternion(); P.q = q0.toArray();
     g.quaternion.copy(q0); g.position.set(0, 0, 0); g.updateMatrixWorld(true); const bbr = new THREE.Box3().setFromObject(g);
     if (this.autoOn(ev)) { const r = findAssembly({ M: this.M, mover: P, p0: null, q0, ray: this.rayOf(ev), cursor: new THREE.Vector2(ev.clientX, ev.clientY), exclude: new Set(), toScreen: v => this.toScreen(v), camPos: this.cam.position }); best = r.best; near = r.near; }
     void bb; if (best) { g.position.copy(best.p); g.quaternion.copy(best.q); } else { g.position.set(gp.x, -bbr.min.y + 0.0005, gp.z); g.quaternion.copy(q0); }
@@ -365,8 +374,9 @@ class App {
   }
   ptrUp(e) { const D = this.pd; if (!D) return; this.pd = null; this.orbit.enabled = true; if (D.started) { this.tcDragged = true; this.directEnd(D); } }
   directStart(e) {
-    const D = this.pd; this.lastSnap = this.snapshot(); this.select({ p: D.pid }); this.tc.detach(); this.snapAlt = 0; this.rotInfo = ''; this.orbit.enableZoom = false;
+    const D = this.pd; this.lastSnap = this.snapshot(); const multi = (this.msel && this.msel.size > 1 && this.msel.has(D.pid)) ? [...this.msel] : null; this.select({ p: D.pid }, !!multi); this.tc.detach(); this.snapAlt = 0; this.rotInfo = ''; this.orbit.enableZoom = false;
     const an = analyze(this.M), g = an.groupOf[D.pid], comp = an.comps[an.compOf[D.pid]];
+    if (multi) { const ids = new Set(); let anch = false; for (const id of multi) { const c = an.comps[an.compOf[id]]; if (!c) continue; if (c.anchored) anch = true; c.parts.forEach(p => ids.add(p.id)); } if (!anch) { D.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(this.cam.getWorldDirection(new THREE.Vector3()).negate(), D.hit); D.start = {}; for (const P of this.M.parts) D.start[P.id] = { p: V3(P.p), q: Q4(P.q) }; this.dragPoses = {}; this.directRigid([...ids], D.hit); D.multi = true; return; } }
     D.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(this.cam.getWorldDirection(new THREE.Vector3()).negate(), D.hit);
     D.start = {}; for (const P of this.M.parts) D.start[P.id] = { p: V3(P.p), q: Q4(P.q) };
     this.dragPoses = {};
@@ -426,7 +436,7 @@ class App {
       this.lastDragGap = s.maxGap(); s.free();
     }
     this.rotInfo = ''; this.orbit.enableZoom = true;
-    this.dragPoses = null; this.clearPreview(); this.commit(); this.rebuild(); this.select({ p: D.pid });
+    this.dragPoses = null; this.clearPreview(); this.commit(); this.rebuild(); if (D.multi) this.select({ p: D.pid }, true); else this.select({ p: D.pid });
     if (res) this.announce(res); else if (D.detached) this.msg('已拆开并移动'); 
   }
   detach(pid) {
@@ -442,18 +452,21 @@ class App {
     const ms = this.msel || new Set();
     for (const id in this.objs) { const on = (this.sel && this.sel.p === id) || ms.has(id), hv = this.hoverPid === id; this.objs[id].traverse(o => { if (o.isMesh && o.material.emissive) { o.material.emissive.setHex(hv ? 0xf59e0b : on ? 0x1d4ed8 : o.userData.baseEm); o.material.emissiveIntensity = hv ? 0.45 : on ? 0.35 : 1; } }); }
     this.olSync();
-    if (this.sel && this.sel.p && this.mode === 'edit' && this.tool === 'select' && this.part(this.sel.p) && !this.part(this.sel.p).locked) {
+    if (this.gizmoOn && this.sel && this.sel.p && this.mode === 'edit' && this.tool === 'select' && this.part(this.sel.p) && !this.part(this.sel.p).locked) {
       const P = this.part(this.sel.p); this.proxy.position.copy(V3(P.p)); this.proxy.quaternion.copy(Q4(P.q)); this.tc.attach(this.proxy);
     } else this.tc.detach();
   }
   showPoints() {
     if (this.ptsGroup) this.scene.remove(this.ptsGroup);
     const g = this.ptsGroup = new THREE.Group(); this.scene.add(g);
-    if (this.mode !== 'edit' || this.tool === 'select') return;
+    if (this.mode !== 'edit' || this.tool === 'select' || this.tool === 'addcon') return;
     const geo = new THREE.SphereGeometry(0.006, 10, 8), m = new THREE.MeshBasicMaterial({ color: 0x2563eb, depthTest: false, transparent: true, opacity: 0.8 });
-    for (const P of this.M.parts) for (const pt of DEFS[P.type].pts(P.d)) { const s = new THREE.Mesh(geo, m); s.position.copy(ptW(P, pt.p)); s.renderOrder = 9; s.userData.helper = true; g.add(s); }
+    for (const P of this.M.parts) for (const pt of (this.tool === 'mate' ? connectors(P).filter(c => !c.line) : DEFS[P.type].pts(P.d))) { const s = new THREE.Mesh(geo, m); s.position.copy(ptW(P, pt.p)); s.renderOrder = 9; s.userData.helper = true; s.raycast = () => { }; g.add(s); }
   }
-  setTool(t) { this.tool = t; this.pick1 = null; this.hl2.visible = false; document.querySelectorAll('.tool').forEach(b => b.classList.toggle('sel', b.dataset.t === t)); this.updSel(); this.showPoints(); this.msg(t === 'select' ? '选择/移动：点击零件选中，拖动坐标轴移动' : (JT[t] ? JT[t] + '：依次点击两个零件的连接点（蓝点），第二下点地面=连接大地' : CT[t] + '：依次点击两个已用铰链/滑动副安装好的传动零件')); }
+  setTool(t) { if (this.mateS) this.mateCancel(); this.tool = t; this.pick1 = null; this.mate1 = null; this.hl2.visible = false; document.querySelectorAll('.tool').forEach(b => b.classList.toggle('sel', b.dataset.t === t)); this.updSel(); this.showPoints(); if (this.showToolBar) this.showToolBar();
+    if (t === 'mate') return this.msg('配合：先点击零件 A 上的面/连接点，再点击零件 B 上的面/连接点 → A 贴合到 B（法向相对），然后选择连接类型、偏移、角度');
+    if (t === 'addcon') return this.msg('添加连接点：选择类型（孔/轴/安装面），在零件表面点击放置；Esc 完成');
+    this.msg(t === 'select' ? '选择/移动：左键拖动零件移动（靠近连接点自动装配），G 显示坐标轴' : (JT[t] ? JT[t] + '：依次点击两个零件的连接点（蓝点），第二下点地面=连接大地' : CT[t] + '：依次点击两个已用铰链/滑动副安装好的传动零件')); }
   // ---------------- edit drag (constraints kept) ----------------
   dragStart() {
     if (this.mode !== 'edit' || !this.sel || !this.sel.p) return;
@@ -507,7 +520,7 @@ class App {
   altType(best) { if (!best || !best.alts || best.alts.length < 2) return null; const n = best.alts.length; return best.alts[((this.snapAlt || 0) % n + n) % n]; }
   cycleSnapType(d) { this.snapAlt = (this.snapAlt || 0) + d; this.refreshDragPreview(); }
   refreshDragPreview() {
-    if (this.palDrag && this._palEv) { this.previewPalette(this._palEv.type, this._palEv.ev); return; }
+    if (this.palDrag && this._palEv) { this.previewPalette(this._palEv.type, this._palEv.ev, this._palEv.over); return; }
     if (this.pd && this.pd.started && this.pd.lastEv) { this.directMove(this.pd.lastEv); return; }
     if (this._pv) this.showPreview(this._pv[0], this._pv[1]);
   }
@@ -622,13 +635,19 @@ class App {
     js.slice(0, 5).forEach(j => { html += `<div class="ch2">${nm(j)}</div>` + [['type:revolute', '改为铰链'], ['type:fixed', '改为固定'], ['type:prismatic', '改为滑动'], ['flip', '反转轴'], ['del', '删除连接'], ['split', '拆开']].filter(([a]) => a !== 'type:' + j.type && !(a === 'flip' && ['fixed', 'spherical'].includes(j.type))).map(([a, t]) => `<div class="ci" data-a="${a}" data-j="${j.id}">${t}</div>`).join(''); });
     if (!js.length) html += '<div class="ch2">（无连接）</div>';
     if (h.pid && js.length) html += `<div class="ci" data-a="detach" data-p="${h.pid}">拆开全部连接</div>`;
+    if (h.pid) html += `<div class="ch2">编辑</div><div class="ci" data-a="gizmo" data-p="${h.pid}">${this.gizmoOn && this.tc.mode === 'translate' ? '隐藏坐标轴 (G)' : '显示移动坐标轴 (G)'}</div><div class="ci" data-a="gizmoR" data-p="${h.pid}">${this.gizmoOn && this.tc.mode === 'rotate' ? '隐藏旋转坐标轴' : '显示旋转坐标轴 (Shift+G)'}</div><div class="ci" data-a="mate" data-p="${h.pid}">🧲 从此处开始配合 (M)</div><div class="ci" data-a="addcon" data-p="${h.pid}">＋ 在此处添加连接点</div>`;
+    if (h.pid && this.selIds().length > 1) html += `<div class="ci" data-a="group">组合所选 (Ctrl+G)</div><div class="ci" data-a="dupsel">复制所选 (Ctrl+D)</div>`;
     html += `<div class="ci" data-a="props" data-p="${h.pid || ''}" data-j="${h.jid || ''}">属性…</div>`;
     el.innerHTML = html; el.style.display = 'block'; const cr = $('center').getBoundingClientRect();
     el.style.left = (e.clientX - cr.left + 2) + 'px'; el.style.top = Math.min(e.clientY - cr.top + 2, cr.height - el.offsetHeight - 4) + 'px';
-    if (h.jid) this.select({ j: h.jid }); else this.select({ p: h.pid });
+    if (h.jid) this.select({ j: h.jid }); else if (!(this.msel && this.msel.has(h.pid))) this.select({ p: h.pid });
+    const hit = h;
     el.querySelectorAll('.ci').forEach(it => it.onclick = ev => {
       ev.stopPropagation(); const a = it.dataset.a, jid = it.dataset.j; this.hideCtx();
       if (a.startsWith('type:')) this.setJointType(jid, a.slice(5)); else if (a === 'flip') this.flipJoint(jid); else if (a === 'del') this.deleteJoint(jid); else if (a === 'split') this.splitJoint(jid);
+      else if (a === 'gizmo') { this.select({ p: it.dataset.p }); this.toggleGizmo('translate'); } else if (a === 'gizmoR') { this.select({ p: it.dataset.p }); this.toggleGizmo('rotate'); }
+      else if (a === 'mate') { this.setTool('mate'); this.mateClick(hit); } else if (a === 'addcon') { this.setTool('addcon'); this.conClick(hit); }
+      else if (a === 'group') this.groupSel(); else if (a === 'dupsel') this.cloneSet(this.selIds(), 'copy');
       else if (a === 'detach') this.detach(it.dataset.p); else if (a === 'props') this.select(jid ? { j: jid } : { p: it.dataset.p });
     });
   }
@@ -636,9 +655,9 @@ class App {
   // ---------------- run control ----------------
   startRun() {
     if (this.mode === 'run') return;
-    if (this.mode === 'edit') { this.init = this.snapshot(); if (this.sim) this.sim.free(); this.sim = new Sim(this.M, { gravity: this.gravity }); this.tracePts = []; this.plotData = []; this.pick1 = null; for (const k in this.cobjs) this.cobjs[k].s = 0; }
+    if (this.mode === 'edit') { this.init = this.snapshot(); if (this.sim) this.sim.free(); this.sim = new Sim(this.M, { gravity: this.gravity }); this.sim.keys = this.keys; this.tracePts = []; this.plotData = []; this.pick1 = null; for (const k in this.cobjs) this.cobjs[k].s = 0; }
     if (this.flash) { this.flash.t0 = -1e9; this.updFlash(performance.now()); }
-    this.mode = 'run'; this.tc.detach(); this.showPoints(); this.updButtons(); this.updProps(); this.msg('运行中：真实3D物理（重力、碰撞、摩擦、电机）');
+    this.mode = 'run'; this.tc.detach(); this.showPoints(); this.updButtons(); this.updProps(); const bk = [...this.boundKeys()].map(keyLabel); this.msg('运行中：真实3D物理（重力、碰撞、摩擦、电机）' + (bk.length ? '　键盘控制：' + bk.join(' / ') : ''));
   }
   pause() { if (this.mode !== 'run') return; this.mode = 'pause'; this.updButtons(); this.msg('已暂停：可“将当前运行状态设为初始状态”，或“重置”回编辑模式'); }
   toggleRun() { if (this.mode === 'run') this.pause(); else this.startRun(); }
@@ -651,7 +670,7 @@ class App {
   setInitialFromRun() {
     if (!this.sim) return; if (this.mode === 'run') this.pause();
     for (const P of this.M.parts) { const ps = this.sim.partPose(P.id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); }
-    this.init = this.snapshot(); this.undoS.push(this.lastSnap || this.init); this.lastSnap = this.init;
+    this.init = this.snapshot(); this.undoS.push(this.lastSnap || this.init); if (this.undoS.length > 200) this.undoS.shift(); this.lastSnap = this.init;
     this.msg('已将当前运行姿态设为初始状态（速度清零），重置后回到此姿态');
   }
   simulate(sec) { if (!this.sim) return; const n = Math.round(sec / this.sim.h); for (let i = 0; i < n; i++) { this.sim.substep(); this.afterSub(); } this.syncPoses(); }
@@ -760,7 +779,8 @@ class App {
     $('btnFit').onclick = () => this.fit();
     document.querySelectorAll('[data-view]').forEach(b => b.onclick = () => this.view(b.dataset.view));
     $('btnMove').onclick = () => this.setGizmo('translate'); $('btnRot').onclick = () => this.setGizmo('rotate');
-    window.addEventListener('keydown', e => this.key(e));
+    window.addEventListener('keydown', e => this.key(e)); window.addEventListener('keyup', e => this.runKey(e, false));
+    this.initExtra();
   }
   renderRecent() { const el = $('palRecent'); el.innerHTML = ''; for (const t of this.recent) this.mkItem(t, el); $('recentHdr').style.display = this.recent.length ? '' : 'none'; }
   noteRecent(t) { this.recent = [t, ...this.recent.filter(x => x !== t)].slice(0, 6); try { localStorage.setItem('mech3d-recent', JSON.stringify(this.recent)); } catch (e) { /* file:// without storage */ } this.renderRecent(); this.filterPalette(); }
@@ -789,7 +809,7 @@ class App {
   }
   renderOutliner() {
     const el = $('olList'); if (!el) return; const q = $('olSearch').value.trim().toLowerCase(), st = el.scrollTop; el.innerHTML = '';
-    const ICON = { base: '▣', rod: '━', shaft: '┃', wheel: '◯', block: '▭', plate: '▬', bearing: '⊓', caster: '⑂', ball: '●', wall: '▁', motor: 'Ⓜ', gear: '✲', rack: '☰', bevel: '◭', worm: '∿', wormwheel: '❂', pulley: '◎', sprocket: '✺', cam: '◐', follower: '│', screw: '⫶', nut: '⬡', flywheel: '⦿', gearbox: '▤', clutch: '⧉', ujoint: '✚' };
+    const ICON = { base: '▣', rod: '━', shaft: '┃', wheel: '◯', block: '▭', plate: '▬', bearing: '⊓', caster: '⑂', ball: '●', wall: '▁', motor: 'Ⓜ', gear: '✲', rack: '☰', bevel: '◭', worm: '∿', wormwheel: '❂', pulley: '◎', sprocket: '✺', cam: '◐', follower: '│', screw: '⫶', nut: '⬡', flywheel: '⦿', gearbox: '▤', clutch: '⧉', ujoint: '✚', mesh: '◆' };
     const jOf = P => this.M.joints.filter(j => j.a === P.id || j.b === P.id), cOf = P => this.M.couplings.filter(c => c.pa === P.id || c.pb === P.id);
     const match = P => !q || (P.name || '').toLowerCase().includes(q) || DEFS[P.type].label.toLowerCase().includes(q);
     const nm = id => id ? ((this.part(id) || {}).name || '?') : '大地';
@@ -848,29 +868,36 @@ class App {
     this.orbit.target.copy(c); this.cam.position.copy(c).addScaledVector(dir, r / Math.sin(this.cam.fov * D2R / 2) * 1.6); this.orbit.update();
     if (!(this.sel && this.sel.p === pid)) this.select({ p: pid }); this.msg('视角已聚焦到 ' + this.part(pid).name);
   }
-  setGizmo(m) { this.tc.setMode(m); $('btnMove').classList.toggle('on', m === 'translate'); $('btnRot').classList.toggle('on', m === 'rotate'); }
+  setGizmo(m) { this.tc.setMode(m); if (this.updGizmoBtns) this.updGizmoBtns(); }
   key(e) {
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
     const k = e.key.toLowerCase();
+    if (this.runKey(e, true)) return;
     if (e.code === 'Space') { e.preventDefault(); this.toggleRun(); }
+    else if ((e.ctrlKey || e.metaKey) && k === 'g') { e.preventDefault(); if (e.shiftKey) this.ungroupSel(); else this.groupSel(); }
+    else if (k === 'g' && !e.ctrlKey && !e.metaKey && !e.altKey) this.toggleGizmo(e.shiftKey ? 'rotate' : null);
+    else if (k === 'm' && !e.ctrlKey && !e.metaKey) this.setTool(this.tool === 'mate' ? 'select' : 'mate');
+    else if (k === 'enter' && this.mateS) this.mateCommit();
     else if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); }
     else if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); this.redo(); }
     else if ((e.ctrlKey || e.metaKey) && k === 's') { e.preventDefault(); this.save(); }
     else if ((e.ctrlKey || e.metaKey) && k === 'd') { e.preventDefault(); this.duplicate(); }
     else if (k === 'delete' || k === 'backspace') this.deleteSel();
-    else if (k === 'escape') { this.pick1 = null; this.hl2.visible = false; this.armed = null; if (this.tool !== 'select') this.setTool('select'); else this.select(null); }
-    else if (k === 'w') this.setGizmo('translate'); else if (k === 'e') this.setGizmo('rotate');
+    else if (k === 'escape' && this.mateS) this.mateCancel();
+    else if (k === 'escape') { this.pick1 = null; this.mate1 = null; this.hl2.visible = false; this.armed = null; if (this.tool !== 'select') this.setTool('select'); else this.select(null); }
+    else if (k === 'w' && this.mode === 'edit') this.setGizmo('translate'); else if (k === 'e' && this.mode === 'edit') this.setGizmo('rotate');
     else if (k === 'r' && !e.ctrlKey && !e.metaKey && !e.altKey) this.rotateSel(e.shiftKey ? -1 : 1);
     else if (k === 'f') { if (this.sel && this.sel.p) this.focusPart(this.sel.p); else this.fit(); }
   }
-  paletteDrag(el, type) {
+  paletteDrag(el, type, over) {
     el.addEventListener('pointerdown', e => {
-      e.preventDefault(); this.palDrag = true; this.palRot = null; this.rotInfo = ''; this.snapAlt = 0; this.orbit.enableZoom = false; const gh = $('ghost'); gh.textContent = DEFS[type].label; gh.style.display = 'block';
+      if (e.button !== 0) return;
+      e.preventDefault(); this.palDrag = true; this.palRot = null; this.rotInfo = ''; this.snapAlt = 0; this.orbit.enableZoom = false; const gh = $('ghost'); gh.textContent = over && over.name ? over.name : DEFS[type].label; gh.style.display = 'block';
       const inCv = ev => { const r = $('cv').getBoundingClientRect(); return ev.clientX > r.left && ev.clientX < r.right && ev.clientY > r.top && ev.clientY < r.bottom; };
-      const mv = ev => { gh.style.left = ev.clientX + 8 + 'px'; gh.style.top = ev.clientY + 8 + 'px'; if (inCv(ev) && this.mode === 'edit') { this.previewPalette(type, ev); gh.style.opacity = 0.35; } else { this.clearPreview(); gh.style.opacity = ''; } }; mv(e);
+      const mv = ev => { gh.style.left = ev.clientX + 8 + 'px'; gh.style.top = ev.clientY + 8 + 'px'; if (inCv(ev) && this.mode === 'edit') { this.previewPalette(type, ev, over); gh.style.opacity = 0.35; } else { this.clearPreview(); gh.style.opacity = ''; } }; mv(e);
       const up = ev => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); gh.style.display = 'none'; this.clearPreview();
         const pq = this.palRot ? this.palRot.clone() : null; this.palDrag = false; this.palRot = null; this.rotInfo = ''; this.orbit.enableZoom = true; this._palEv = null;
-        if (inCv(ev)) { if (this.mode !== 'edit') this.reset(); this.placePart(type, this.groundPoint(ev), undefined, this.autoOn(ev) ? { ray: this.rayOf(ev), cursor: new THREE.Vector2(ev.clientX, ev.clientY), q: pq } : (pq ? { q: pq } : null)); }
+        if (inCv(ev)) { if (this.mode !== 'edit') this.reset(); this.placePart(type, this.groundPoint(ev), over ? Object.assign(JSON.parse(JSON.stringify(over)), { name: this.uniqueName(over.name || '导入零件') }) : undefined, this.autoOn(ev) ? { ray: this.rayOf(ev), cursor: new THREE.Vector2(ev.clientX, ev.clientY), q: pq } : (pq ? { q: pq } : null)); }
         else if (el.contains(document.elementFromPoint(ev.clientX, ev.clientY))) { document.querySelectorAll('.item.armed').forEach(x => x.classList.remove('armed')); this.armed = type; el.classList.add('armed'); this.msg('点击场景中的位置放置 ' + DEFS[type].label); }
       };
       window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
@@ -884,14 +911,15 @@ class App {
     const jids = new Set(this.M.joints.map(j => j.id)); this.M.couplings = this.M.couplings.filter(c => jids.has(c.ja) && jids.has(c.jb) && this.part(c.pa) && this.part(c.pb));
     this.sel = null; this.msel = new Set(); this.commit(); this.rebuild(); this.msg('已删除');
   }
-  duplicate() { if (!this.sel || !this.sel.p || this.mode !== 'edit') return; const P = this.part(this.sel.p); this.beginEdit(); const C = JSON.parse(JSON.stringify(P)); C.id = 'p' + (this.M.nid++); C.name = this.autoName(P.type); delete C.locked; delete C.hidden; C.p = [P.p[0] + 0.05, P.p[1], P.p[2] + 0.05]; this.M.parts.push(C); this.commit(); this.rebuild(); this.select({ p: C.id }); }
+  duplicate() { if (this.mode === 'edit' && this.selIds().length > 1) return this.cloneSet(this.selIds(), 'copy'); if (!this.sel || !this.sel.p || this.mode !== 'edit') return; const P = this.part(this.sel.p); this.beginEdit(); const C = JSON.parse(JSON.stringify(P)); C.id = 'p' + (this.M.nid++); C.name = this.autoName(P.type); delete C.locked; delete C.hidden; C.p = [P.p[0] + 0.05, P.p[1], P.p[2] + 0.05]; this.M.parts.push(C); this.commit(); this.rebuild(); this.select({ p: C.id }); }
   // ---------------- property panel ----------------
   updProps() {
     const el = $('props'); el.innerHTML = ''; const ed = this.mode === 'edit';
     const row = (label, html, u = '') => { const d = document.createElement('div'); d.className = 'row'; d.innerHTML = `<label>${label}</label>${html}<span class="u">${u}</span>`; el.appendChild(d); return d; };
     const num = (label, val, u, set, step = 'any') => { const r = row(label, `<input type="number" step="${step}" value="${+(+val).toFixed(5)}" ${ed ? '' : 'disabled'}>`, u); if (set) r.querySelector('input').onchange = e => { this.beginEdit(); set(+e.target.value); this.commit(); this.rebuild(); }; return r; };
+    if (this.sel && this.sel.p && this.msel && this.msel.size > 1) { this.multiPanel(el, this.selIds()); return; }
     if (!this.sel) {
-      el.innerHTML = `<div class="title">装配概览</div><div style="color:#6b7280;line-height:1.6">零件 ${this.M.parts.length} 个，连接 ${this.M.joints.length} 个，传动 ${this.M.couplings.length} 个。<br>中键拖动=旋转视角，右键拖动=平移，滚轮=缩放，左键=选择/拖动零件。点选零件后用坐标轴拖动（W 移动 / E 旋转），或按 R 旋转 15°（Shift+R 反向）。左侧“组件”栏可快速选中任意零件。</div>`;
+      el.innerHTML = `<div class="title">装配概览</div><div style="color:#6b7280;line-height:1.6">零件 ${this.M.parts.length} 个，连接 ${this.M.joints.length} 个，传动 ${this.M.couplings.length} 个。<br>中键拖动=旋转视角，右键拖动=平移，滚轮=缩放，左键=选择/拖动零件。左键直接拖动零件移动（靠近连接点自动装配，可吸附到杆身/板面任意位置），R 旋转 15°（Shift+R 反向）；需要精确移动时按 G 显示坐标轴。🧲 配合(M)：两次点击把零件面贴面装配。📥 导入零件：STL/OBJ/GLB。Ctrl/Shift+点击多选 → 组合 / 复制 / 镜像。</div>`;
       this.listJoints(el, this.M.joints, this.M.couplings); return;
     }
     if (this.sel.p) {
@@ -913,6 +941,8 @@ class App {
             lb.onpointermove = ev => { v = v0 + (ev.clientX - x0) * st; v = kind === 'int' ? Math.max(3, Math.round(v)) : Math.max(0.1, +v.toFixed(1)); inp.value = v; this.resizeLive(pid, { [k]: fromUI(v) }); };
             lb.onpointerup = () => { lb.onpointermove = lb.onpointerup = null; if (v !== v0) this.resizeCommit(pid, { [k]: fromUI(v) }); }; }; }
       }
+      if (P.type === 'mesh') { const G = GEO[P.d.g], hint = document.createElement('div'); hint.className = 'hint2'; hint.textContent = G ? `导入：${G.name}　尺寸 ${G.box.map(x => (x * 2000 * (P.d.sc || 1)).toFixed(1)).join('×')} mm　${G.tris} 面　体积 ${(G.vol * 1e6 * (P.d.sc || 1) ** 3).toFixed(2)} cm³` : '缺少几何数据'; el.appendChild(hint);
+        const rc = row('碰撞体', `<select ${ed ? '' : 'disabled'}><option value="hull">凸包（可运动）</option><option value="tri">三角网格（固定）</option></select>`); const cs = rc.querySelector('select'); cs.value = P.d.col || 'hull'; cs.onchange = e => { this.beginEdit(); P.d.col = e.target.value; if (P.d.col === 'tri') P.fixed = true; this.commit(); this.rebuild(); }; }
       num('质量', P.mass, 'kg', v => { P.mass = Math.max(1e-4, v); P.massManual = true; });
       if (ed) { const b = document.createElement('button'); b.className = 'small'; b.textContent = '按材料密度计算质量'; b.onclick = () => { this.beginEdit(); P.massManual = false; P.mass = defaultMass(P); this.commit(); this.rebuild(); }; el.appendChild(b); }
       const rf = row('固定于大地', `<input type="checkbox" ${P.fixed ? 'checked' : ''} ${ed ? '' : 'disabled'}>`); rf.querySelector('input').onchange = e => { this.beginEdit(); P.fixed = e.target.checked; this.commit(); this.rebuild(); };
@@ -930,6 +960,9 @@ class App {
       if (ed) { const rr = row('旋转 15°', `<select id="rotAx" style="flex:none;width:64px"><option value="view">视角轴</option><option value="X">X</option><option value="Y">Y</option><option value="Z">Z</option></select><button class="small" id="bRotM" title="Shift+R">−15°</button><button class="small" id="bRotP" title="R">+15°</button>`); const sa = rr.querySelector('#rotAx'); sa.value = this.rotAxis || 'view'; sa.onchange = e => { this.rotAxis = e.target.value; }; rr.querySelector('#bRotP').onclick = () => this.rotateSel(1); rr.querySelector('#bRotM').onclick = () => this.rotateSel(-1); }
       const pts = D.pts(P.d); const rt = row('轨迹点', `<select>${pts.map((p, i) => `<option value="${i}">${p.n}</option>`).join('')}</select>`); const ts = rt.querySelector('select'); ts.value = P.tracePt != null ? P.tracePt : (P.type === 'rod' ? 1 : 0); ts.onchange = e => { P.tracePt = +e.target.value; this.tracePts = []; };
       if (ed) { const nj = this.M.joints.filter(j => j.a === P.id || j.b === P.id).length + this.M.couplings.filter(c => c.pa === P.id || c.pb === P.id).length; const bb = document.createElement('div'); bb.innerHTML = `<button class="small run" id="bTrial">▶ 试运行 3 秒</button>${nj ? ' <button class="small" id="bDetach">拆开 (' + nj + ')</button>' : ''}<br><button class="small" id="bDup">复制 (Ctrl+D)</button> <button class="del" id="bDel">删除零件 (Del)</button>`; el.appendChild(bb); $('bDup').onclick = () => this.duplicate(); $('bDel').onclick = () => this.deleteSel(); $('bTrial').onclick = () => this.trialRun(3); if (nj) $('bDetach').onclick = () => this.detach(P.id); }
+      { const h = document.createElement('h3'); h.textContent = '自定义连接点 (' + (P.cons ? P.cons.length : 0) + ')'; el.appendChild(h);
+        (P.cons || []).forEach((c, i) => { const d = document.createElement('div'); d.className = 'jl'; d.innerHTML = `${({ hole: '孔', pin: '轴', mount: '安装面' })[c.role]}：${c.n} <span style="float:right;color:#dc2626" class="cdel" title="删除">✕</span>`; el.appendChild(d); d.querySelector('.cdel').onclick = () => this.removeConnector(P.id, i); });
+        if (ed) { const b = document.createElement('button'); b.className = 'small'; b.textContent = '＋ 在表面添加连接点'; b.onclick = () => this.setTool('addcon'); el.appendChild(b); } }
       { const js = this.M.joints.filter(j => j.a === P.id || j.b === P.id), cs = this.M.couplings.filter(c => c.pa === P.id || c.pb === P.id);
         const h = document.createElement('h3'); h.textContent = '连接 (' + (js.length + cs.length) + ')'; h.id = 'connHdr'; el.appendChild(h);
         if (!js.length && !cs.length) { const d = document.createElement('div'); d.className = 'hint2'; d.textContent = '此零件还没有连接。把它拖到其它零件的连接点即可自动装配。'; el.appendChild(d); }
@@ -975,7 +1008,7 @@ class App {
       const c = row('自定义轴', ['x', 'y', 'z'].map((k, i) => `<input type="number" step="0.1" value="${n.getComponent(i).toFixed(3)}" ${dis}>`).join('') + `<button class="small" ${dis}>应用</button>`); c.classList.add('jcustom'); if (near !== 'C') c.style.display = 'none';
       c.querySelector('button').onclick = () => { const v = new THREE.Vector3(...[...c.querySelectorAll('input')].map(x => +x.value)); if (v.length() > 1e-6) this.setJointAxis(j.id, v); };
     }
-    const det = document.createElement('details'); det.className = 'jdet'; if (open) det.open = true; det.innerHTML = '<summary>限位 / 驱动 / 摩擦</summary>'; body.appendChild(det);
+    const det = document.createElement('details'); det.className = 'jdet'; if (open) det.open = true; det.innerHTML = '<summary>限位 / 驱动(电机) / 弹簧阻尼 / 按键</summary>'; body.appendChild(det);
     const drow = (label, html) => { const d = document.createElement('div'); d.className = 'jrow'; d.innerHTML = `<label>${label}</label>${html}`; det.appendChild(d); return d; };
     const numIn = (v, cls) => `<input type="number" step="any" class="${cls}" value="${+(+v).toFixed(4)}" ${dis}>`;
     if (j.type === 'revolute' || j.type === 'prismatic') {
@@ -990,13 +1023,23 @@ class App {
         r2.querySelector('.jmt').onchange = e => this.editJoint(j.id, () => { mot.motor.maxT = +e.target.value; }, '电机最大扭矩已修改');
         const r3 = drow('转向', `<label class="inl"><input type="checkbox" class="jrev" ${j.motorRev ? 'checked' : ''} ${dis}>反转</label>`); r3.querySelector('.jrev').onchange = e => this.editJoint(j.id, jj => { jj.motorRev = e.target.checked; }, '电机方向已修改');
       } else {
-        const Dv = j.drive || { on: false, v: rv ? 30 * Math.PI / 30 : 0.05, maxF: 10 }, kv = rv ? 30 / Math.PI : 1000;
-        const r2 = drow('驱动', `<input type="checkbox" class="jdon" ${Dv.on ? 'checked' : ''} ${dis}>${numIn(Dv.v * kv, 'jdv')}<span class="u">${rv ? 'rpm' : 'mm/s'}</span>${numIn(Dv.maxF, 'jdf')}<span class="u">${rv ? 'N·m' : 'N'}</span>`);
-        r2.querySelectorAll('input').forEach(i => i.onchange = () => this.editJoint(j.id, jj => { jj.drive = { on: r2.querySelector('.jdon').checked, v: +r2.querySelector('.jdv').value / kv, maxF: +r2.querySelector('.jdf').value }; }, '驱动已修改'));
+        const Dv = Object.assign({ on: false, mode: 'speed', v: rv ? 30 * Math.PI / 30 : 0.05, maxF: 10, pos: rv ? 25 * D2R : 0.02 }, j.drive || {}), kv = rv ? 30 / Math.PI : 1000, kp = rv ? 1 / D2R : 1000;
+        const r2 = drow('驱动', `<input type="checkbox" class="jdon" ${Dv.on ? 'checked' : ''} ${dis}><select class="jdm" ${dis}>${Object.entries(DRIVE_N).map(([k, n]) => `<option value="${k}" ${k === Dv.mode ? 'selected' : ''}>${n}</option>`).join('')}</select>`);
+        const r2b = drow(Dv.mode === 'servo' ? '目标' : Dv.mode === 'torque' ? '力/力矩' : '目标速度', Dv.mode === 'servo' ? `${numIn(Dv.pos * kp, 'jdp2')}<span class="u">${rv ? '°' : 'mm'}</span>` : Dv.mode === 'torque' ? `${numIn(Dv.tq != null ? Dv.tq : Dv.maxF, 'jdt')}<span class="u">${rv ? 'N·m' : 'N'}</span>` : `${numIn(Dv.v * kv, 'jdv')}<span class="u">${rv ? 'rpm' : 'mm/s'}</span>`);
+        const r2c = drow('最大' + (rv ? '力矩' : '力'), `${numIn(Dv.maxF, 'jdf')}<span class="u">${rv ? 'N·m' : 'N'}</span>`);
+        const r2d = drow('键盘', `<input type="text" class="jkp" readonly placeholder="正" value="${keyLabel(Dv.keyP)}" style="width:42px" ${dis}><input type="text" class="jkn" readonly placeholder="反" value="${keyLabel(Dv.keyN)}" style="width:42px" ${dis}><button class="small jkclr" ${dis}>清除</button>`);
+        const hint = document.createElement('div'); hint.className = 'hint2'; hint.textContent = Dv.mode === 'servo' ? '舵机：运行时按住正/反键转到 ±目标角度，松开回到 0（未绑定按键时保持目标）。' : Dv.mode === 'torque' ? '扭矩模式：按住键施加 ± 力矩（未绑定按键时持续施加）。' : '速度模式：按住正/反键以 ± 目标速度驱动，松开滑行（未绑定按键时持续转动）。'; det.appendChild(hint);
+        const save = () => this.editJoint(j.id, jj => { const o = Object.assign({}, Dv, { on: r2.querySelector('.jdon').checked, mode: r2.querySelector('.jdm').value, maxF: +r2c.querySelector('.jdf').value });
+          const a = r2b.querySelector('input'); if (a.classList.contains('jdv')) o.v = +a.value / kv; else if (a.classList.contains('jdt')) o.tq = +a.value; else o.pos = +a.value / kp; jj.drive = o; }, '驱动已修改');
+        [r2, r2b, r2c].forEach(r => r.querySelectorAll('input,select').forEach(i => i.onchange = save));
+        const bindKey = (cls, prop) => { const inp = r2d.querySelector(cls); inp.onkeydown = e => { e.preventDefault(); e.stopPropagation(); if (e.code === 'Escape') return inp.blur(); this.editJoint(j.id, jj => { jj.drive = Object.assign({}, Dv, jj.drive || {}, { on: true, [prop]: e.code }); }, '已绑定按键 ' + keyLabel(e.code) + '（运行时按住控制此连接）'); }; inp.onfocus = () => { inp.value = '按键…'; }; inp.onblur = () => { inp.value = keyLabel(Dv[prop]); }; };
+        bindKey('.jkp', 'keyP'); bindKey('.jkn', 'keyN');
+        r2d.querySelector('.jkclr').onclick = () => this.editJoint(j.id, jj => { if (jj.drive) { delete jj.drive.keyP; delete jj.drive.keyN; } }, '已清除按键');
       }
       const r4 = drow('摩擦', `${numIn(j.fric || 0, 'jfr')}<span class="u">${rv ? 'N·m' : 'N'}</span>`); r4.querySelector('input').onchange = e => this.editJoint(j.id, jj => { jj.fric = Math.max(0, +e.target.value); }, '摩擦已修改');
       const r5 = drow('阻尼', `${numIn(j.damp || 0, 'jdp')}<span class="u">${rv ? 'N·m·s' : 'N·s/m'}</span>`); r5.querySelector('input').onchange = e => this.editJoint(j.id, jj => { jj.damp = Math.max(0, +e.target.value); }, '阻尼已修改');
-      const r6 = drow('回正刚度', `${numIn(j.kc || 0, 'jkc')}<span class="u">${rv ? 'N·m/rad' : 'N/m'}</span>`); r6.querySelector('input').onchange = e => this.editJoint(j.id, jj => { jj.kc = Math.max(0, +e.target.value); }, '回正刚度已修改');
+      const r6 = drow('弹簧刚度', `${numIn(j.kc || 0, 'jkc')}<span class="u">${rv ? 'N·m/rad' : 'N/m'}</span>`); r6.querySelector('input').onchange = e => this.editJoint(j.id, jj => { jj.kc = Math.max(0, +e.target.value); }, '弹簧刚度已修改（弹簧+阻尼可做悬架 / 回正）');
+      const r6b = drow('平衡位置', `${numIn((j.rest || 0) * k, 'jrest')}<span class="u">${u}</span>`); r6b.querySelector('input').onchange = e => this.editJoint(j.id, jj => { jj.rest = +e.target.value / k; }, '弹簧平衡位置已修改');
       if (rv) { const r7 = drow('', `<button class="small jsteer" ${dis}>设为转向销（竖直轴 + 回正）</button>`); r7.querySelector('button').onclick = () => this.editJoint(j.id, jj => { jj.axa = axL(A, new THREE.Vector3(0, 1, 0)).toArray(); jj.kc = jj.kc || 0.6; jj.damp = jj.damp || 0.08; jj.steer = true; }, '已设为转向铰链（竖直销）'); }
     } else if (j.type === 'helical') {
       const r = drow('导程', `${numIn((j.lead != null ? j.lead : 0.005) * 1000, 'jld')}<span class="u">mm/转</span>`); r.querySelector('input').onchange = e => this.editJoint(j.id, jj => { jj.lead = +e.target.value / 1000; }, '导程已修改');
@@ -1024,14 +1067,14 @@ class App {
       C: (t, A, B, e) => this.addCoupling(t, A, B, e),
       rod: (p1, p2, o = {}) => { const a = V3(p1), b = V3(p2), d = b.clone().sub(a); const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), d.clone().normalize()); o.d = Object.assign({ L: d.length() }, o.d || {}); return this.newPart('rod', a.clone().add(b).multiplyScalar(0.5).toArray(), q.toArray(), o); },
     };
-    PRESETS[i].build(api);
-    this.undoS.push(old); this.redoS = []; this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set();
+    if (PRESETS[i].app) { const u = this.undoS; this.undoS = []; this.lastSnap = this.snapshot(); try { PRESETS[i].build(this); } finally { this.undoS = u; } } else PRESETS[i].build(api);
+    this.undoS.push(old); if (this.undoS.length > 200) this.undoS.shift(); this.redoS = []; this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set();
     const tr = this.M.parts.find(p => p.trace); this.rebuild(); if (tr) this.select({ p: tr.id }); this.fit(); this.updButtons();
     this.msg('已载入示例：' + PRESETS[i].name + ' — ' + PRESETS[i].desc + '（按 Space 运行）');
   }
-  save() { this.download('机械装配3D.json', JSON.stringify({ app: 'mech-sandbox-3d', version: 1, model: this.mode === 'edit' ? this.M : JSON.parse(this.init), camera: { p: this.cam.position.toArray(), t: this.orbit.target.toArray() } }, null, 1), 'application/json'); this.msg('已保存 JSON'); }
+  save() { this.download('机械装配3D.json', JSON.stringify(this.saveData()), 'application/json'); this.msg('已保存 JSON'); }
   loadJSON(t) {
-    try { const o = JSON.parse(t), M = o.model || o; if (!M.parts) throw new Error('无 parts'); if (this.sim) { this.sim.free(); this.sim = null; } this.mode = 'edit'; this.undoS.push(this.snapshot()); this.M = M; M.couplings = M.couplings || []; this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.updButtons(); if (o.camera) { this.cam.position.fromArray(o.camera.p); this.orbit.target.fromArray(o.camera.t); } else this.fit(); this.msg('已读取装配：' + M.parts.length + ' 个零件'); }
+    try { const o = typeof t === 'string' ? JSON.parse(t) : t, M = o.model || o; if (!M.parts) throw new Error('无 parts'); const gs = o.geos || M.geos; if (gs) Object.assign(GEO, gs); delete M.geos; const miss = M.parts.filter(P => P.type === 'mesh' && !GEO[P.d.g]).length; if (miss) this.msg('警告：' + miss + ' 个导入零件缺少几何数据', true); if (this.sim) { this.sim.free(); this.sim = null; } this.mode = 'edit'; this.undoS.push(this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.M = M; M.couplings = M.couplings || []; this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.updButtons(); if (o.camera) { this.cam.position.fromArray(o.camera.p); this.orbit.target.fromArray(o.camera.t); } else this.fit(); this.msg('已读取装配：' + M.parts.length + ' 个零件'); }
     catch (e) { this.msg('读取失败：' + e.message, true); }
   }
   bomCSV() {
@@ -1104,4 +1147,5 @@ class App {
   editGap() { const s = new Sim(this.M, { edit: true }), g = s.maxGap(); s.free(); return g; }
 }
 
+installExtra(App);
 RAPIER.init().then(() => { window.app = new App(); window.dispatchEvent(new Event('app-ready')); }).catch(e => { console.error(e); document.body.insertAdjacentHTML('beforeend', '<div style="position:fixed;top:40%;left:30%;background:#fee;padding:20px">物理引擎加载失败: ' + e + '</div>'); });

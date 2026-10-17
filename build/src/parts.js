@@ -1,4 +1,20 @@
 import * as THREE from 'three';
+import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { b64dec } from './importer.js';
+
+/** imported geometry registry: id -> record (see importer.buildGeo). Parts reference it by d.g; saved files carry the records used. */
+export const GEO = {};
+const _gd = {};
+export function geoData(id) {
+  const G = GEO[id]; if (!G) return null; let c = _gd[id];
+  if (!c || c.G !== G) { c = _gd[id] = { G, pos: b64dec(G.v, Float32Array), idx: b64dec(G.i, Uint32Array), hull: b64dec(G.h, Float32Array) }; }
+  return c;
+}
+function geoBuffer(id) {
+  const c = geoData(id); if (!c) return null;
+  if (!c.buf) { let g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(c.pos, 3)); g.setIndex(new THREE.BufferAttribute(c.idx, 1)); try { g = toCreasedNormals(g, Math.PI / 6); } catch (e) { g.computeVertexNormals(); } g.computeBoundingBox(); g.computeBoundingSphere(); c.buf = g; }
+  return c.buf;
+}
 
 export const MATS = {
   steel: { n: '钢', rho: 7850, mu: 0.5, e: 0.1, color: 0x9aa3ad, metal: 0.75, rough: 0.35 },
@@ -263,6 +279,23 @@ export const DEFS = {
     shapes: d => [{ k: 'ball', r: d.s / 2 }],
     pts: d => [{ n: '中心', p: [0, 0, 0], a: [0, 0, 1] }],
     mesh(d, P) { const s = d.s, g = new THREE.Group(), m = mat(P); g.add(mesh(new THREE.BoxGeometry(s, s * 0.18, s * 0.18), m)); g.add(mesh(new THREE.BoxGeometry(s * 0.18, s, s * 0.18), m)); for (const sg of [-1, 1]) { g.add(mesh(new THREE.BoxGeometry(s * 1.2, s * 0.12, s * 0.5), mat(P, 0x6b7280), [0, sg * s * 0.55, -s * 0.2])); g.add(mesh(new THREE.BoxGeometry(s * 0.12, s * 1.2, s * 0.5), mat(P, 0x6b7280), [sg * s * 0.55, 0, s * 0.2])); } return g; }
+  },
+  // ---------- imported 3D part ----------
+  mesh: {
+    label: '导入零件', cat: 'import', mat: 'plastic', d: { g: '', sc: 1, col: 'hull' }, dims: [['sc', '缩放', 'num']],
+    shapes: d => {
+      const c = geoData(d.g), s = d.sc || 1; if (!c) return [{ k: 'box', h: [0.01, 0.01, 0.01] }];
+      const pts = Array.from(c.hull, x => x * s), vol = c.G.vol * s * s * s;
+      if (d.col === 'tri') return [{ k: 'tri', pts, vol, gid: d.g, sc: s }];
+      return [{ k: 'hull', pts, vol }];
+    },
+    pts: d => { const c = geoData(d.g), s = d.sc || 1, b = c ? c.G.box.map(x => x * s) : [0.01, 0.01, 0.01];
+      return [{ n: '中心', p: [0, 0, 0], a: [0, 0, 1] }, { n: '顶面', p: [0, b[1], 0], a: [0, 1, 0] }, { n: '底面', p: [0, -b[1], 0], a: [0, -1, 0] }, { n: '+X面', p: [b[0], 0, 0], a: [1, 0, 0] }, { n: '-X面', p: [-b[0], 0, 0], a: [-1, 0, 0] }, { n: '+Z面', p: [0, 0, b[2]], a: [0, 0, 1] }, { n: '-Z面', p: [0, 0, -b[2]], a: [0, 0, -1] }]; },
+    mesh(d, P) {
+      const g = new THREE.Group(), buf = geoBuffer(d.g), s = d.sc || 1;
+      if (!buf) { g.add(mesh(new THREE.BoxGeometry(0.02, 0.02, 0.02), mat(P, 0xef4444))); return g; }
+      const o = mesh(buf, mat(P)); o.scale.setScalar(s); g.add(o); return g;
+    }
   },
 };
 

@@ -105,6 +105,14 @@ button.small.run{background:#16a34a;color:#fff;border-color:#15803d}
 .jdot{width:9px;height:9px;border-radius:50%;display:inline-block;background:#999}.t-revolute{background:#f97316}.t-prismatic{background:#10b981}.t-fixed{background:#6366f1}.t-spherical{background:#ec4899}.t-helical{background:#a855f7}.t-gear{background:#eab308}
 .jrow{display:flex;align-items:center;gap:4px;margin:3px 0;flex-wrap:wrap}.jrow label{width:58px;color:#6b7280}.jrow input[type=number]{width:58px}.jrow .u{color:#9ca3af}.jrow label.inl{width:auto}
 .jaxv{color:#9ca3af;font-size:11px}.jdet summary{cursor:pointer;color:#2563eb;margin:3px 0}.jbtns button{margin-top:3px}
+#tbar2{position:absolute;left:50%;transform:translateX(-50%);top:46px;display:none;align-items:center;gap:6px;flex-wrap:wrap;background:#eff6ff;border:1px solid #93c5fd;color:#1e3a8a;padding:5px 10px;border-radius:6px;font-size:13px;z-index:20;box-shadow:0 2px 6px rgba(0,0,0,.12);max-width:calc(100% - 40px)}
+#tbar2 input,#tbar2 select{padding:2px 4px;border:1px solid #cbd5e1;border-radius:4px}#tbar2 .small{margin:0 2px}
+#impDlg{position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:200;display:flex;align-items:center;justify-content:center}
+#impDlg .dlgbox{background:#fff;border-radius:8px;padding:14px 16px;width:400px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+#impDlg .row{display:flex;align-items:center;gap:8px;margin:6px 0}#impDlg .row label{width:70px;color:#4b5563}#impDlg select{flex:1;padding:3px}
+#impDlg .title{font-weight:700;font-size:14px;margin-bottom:6px;word-break:break-all}
+.item.mine{position:relative}.item .mdel{position:absolute;right:2px;top:0;color:#9ca3af;font-size:10px;cursor:pointer}.item .mdel:hover{color:#dc2626}
+.mpanel .row{display:flex;align-items:center;gap:6px;margin:4px 0}
 </style></head>
 <body><div id="app">
 <div id="topbar">
@@ -119,7 +127,7 @@ button.small.run{background:#16a34a;color:#fff;border-color:#15803d}
 <label>速度 <select id="selSpeed"><option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select></label>
 <label title="拖动零件靠近连接点自动建立铰链/啮合/滑动副等；按住 Alt 临时关闭"><input type="checkbox" id="chkAuto" checked> 自动连接</label>
 <label><input type="checkbox" id="chkSnap" checked> 吸附</label>
-<button class="tb on" id="btnMove" title="移动 (W)">✥ 移动</button><button class="tb" id="btnRot" title="旋转 (E)">⟳ 旋转</button>
+<button class="tb" id="btnMove" title="显示移动坐标轴 (W 切换模式 / G 显示隐藏)">✥ 移动</button><button class="tb" id="btnRot" title="显示旋转坐标轴 (E 切换模式 / Shift+G)">⟳ 旋转</button>
 <span class="sep"></span>
 <button class="tb" id="btnUndo" title="撤销 (Ctrl+Z)">↶ 撤销</button><button class="tb" id="btnRedo" title="重做 (Ctrl+Y)">↷ 重做</button>
 <span class="sep"></span>
@@ -137,13 +145,13 @@ button.small.run{background:#16a34a;color:#fff;border-color:#15803d}
 <h3 id="basicHdr">零件库（拖到场景）</h3><div class="pal" id="palItems"></div>
 <h3 id="transHdr">传动零件</h3><div class="pal" id="palTrans"></div><div class="hint2" id="palNone" style="display:none">没有匹配的零件</div>
 <details id="advTools"><summary>高级：手动连接工具</summary><div class="hint2">一般无需使用：直接把零件拖到连接点即可自动装配。</div><div class="tools" id="palTools"></div></details>
-<div class="legend"><span><span class="key">Space</span>运行/暂停</span><span><span class="key">Del</span>删除</span><span><span class="key">Esc</span>取消</span><span><span class="key">W</span>移动</span><span><span class="key">E</span>旋转</span><span><span class="key">Ctrl+Z/Y</span>撤销重做</span><span><span class="key">Ctrl+D</span>复制</span><span><span class="key">R</span>旋转15°</span><span><span class="key">F</span>聚焦/适应</span><span><span class="key">中键</span>旋转视角</span><span><span class="key">右键拖</span>平移</span></div>
+<div class="legend"><span><span class="key">Space</span>运行/暂停</span><span><span class="key">Del</span>删除</span><span><span class="key">Esc</span>取消</span><span><span class="key">G</span>坐标轴</span><span><span class="key">M</span>配合</span><span><span class="key">Ctrl+G</span>组合</span><span><span class="key">Ctrl+Z/Y</span>撤销重做</span><span><span class="key">Ctrl+D</span>复制</span><span><span class="key">R</span>旋转15°</span><span><span class="key">F</span>聚焦/适应</span><span><span class="key">中键</span>旋转视角</span><span><span class="key">右键拖</span>平移</span></div>
 </div>
 <div id="outliner"><div id="olHead"><span id="olToggle" title="折叠/展开">▾</span>组件<span id="olCount">0</span><span style="margin-left:auto;font-weight:400;color:#94a3b8;font-size:11px">Ctrl/Shift 多选</span></div>
 <div id="olBody"><input id="olSearch" type="search" placeholder="🔍 筛选组件"><div id="olList"></div></div></div></div>
-<div id="center"><canvas id="cv"></canvas><div id="tipbar">💡 拖动零件靠近连接点即可自动装配（Alt 自由放置）。<b>中键拖动=旋转视角</b>（在零件上也可）· 右键拖动=平移 · 滚轮=缩放 · 左键=选择/拖动零件 · 拖动零件时滚轮=旋转零件 15° · 选中后 R 旋转 15°（Shift+R 反向）<span id="tipClose" title="关闭">✕</span></div><div id="snapRing"></div><div id="ctx"></div><div id="snapLbl"></div><div id="energy"></div><div id="warn"></div>
+<div id="center"><canvas id="cv"></canvas><div id="tipbar">💡 左键拖动零件到连接点/面上即自动装配（Alt 自由放置，Tab 换连接类型）· <b>中键=旋转视角</b> · 右键=平移 · G 坐标轴 · M 配合 · 📥 可拖入 STL/OBJ/GLB<span id="tipClose" title="关闭">✕</span></div><div id="snapRing"></div><div id="ctx"></div><div id="snapLbl"></div><div id="energy"></div><div id="warn"></div>
 <div id="views"><button data-view="front">前视</button><button data-view="top">俯视</button><button data-view="side">侧视</button><button data-view="iso">轴测</button></div>
-<div id="hint">中键拖动=旋转视角 · 右键拖动=平移 · 滚轮=缩放 · 左键=选择/拖动零件 · R：旋转选中零件</div></div>
+<div id="hint">中键拖动=旋转视角 · 右键拖动=平移 · 滚轮=缩放 · 左键=选择/拖动零件 · R：旋转 · G：坐标轴 · M：配合 · 运行时按绑定键控制关节</div></div>
 <div id="side"><h3>属性</h3><div id="props"></div><div id="readout"></div><canvas id="plot" width="540" height="300"></canvas></div>
 </div>
 <div id="status"><span id="stMsg">加载中…</span><span id="stInfo"></span></div>

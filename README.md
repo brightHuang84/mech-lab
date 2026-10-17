@@ -8,10 +8,13 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - `build/src/parts.js` – part library: geometry (gear teeth, helix threads, lathe pulleys…), colliders, connection points, materials
 - `build/src/physics.js` – Rapier world builder: rigid groups (parts joined by 固定连接 become one body), revolute/prismatic/spherical joints with exact local frames, motors, springs and dampers, a velocity-level coupling solver for gears/belts/chains/screws/gearbox/clutch, an edit-mode relaxation solver, and joint gap/energy measurement
 - `build/src/resize.js` – resizing a part while keeping every connection matched (anchor remapping, anchored-side settling, gear-mesh repositioning, relaxation, feasibility check)
-- `build/src/presets.js` – 14 presets (incl. 三轮车), all built from the same free parts
+- `build/src/presets.js` – 15 presets (incl. 三轮车 and 四轮小车(通用零件装配)), all built from the same free parts
+- `build/src/importer.js` – STL (binary/ASCII) / OBJ / GLB / GLTF (embedded) import: parsing, welding, decimation, volume, convex hull
+- `build/src/extra.js` – 坐标轴开关、导入、我的零件、自定义连接点、配合工具、组合/复制/镜像、运行时按键
+- `build/src/examples.js` – 四轮小车示例：只用通用零件、通过与用户相同的 API（mate / 组合 / 镜像 / 关节驱动）搭建
 - `build/src/app.js` – UI, scene, gizmo, tools, run/pause/reset/initial state, undo/redo, IO
 - `build/template.html`, `build/build.sh` – to rebuild: `cd build && npm ci && ./build.sh`
-- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 140 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search); `tests/resize.js` (尺寸修改后连接保持贴合)
+- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 164 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search); `tests/resize.js` (尺寸修改后连接保持贴合); `tests/features.js` (坐标轴开关、STL/OBJ/GLB 导入与存读、沿杆任意位置吸附、面贴合、配合、关节限位/弹簧编辑、组合镜像、四轮车行驶验证); 测试模型在 `tests/fixtures/`
 
 ## 鼠标与键盘操作
 | 操作 | 作用 |
@@ -24,7 +27,12 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 | 滚轮（未拖动零件） | 缩放 |
 | 拖动零件时滚轮 | 旋转零件 15°/格；Shift/Ctrl+滚轮切换旋转轴（视角→X→Y→Z）|
 | R / Shift+R | 选中零件旋转 +15° / −15° |
-| W / E | 坐标轴：移动 / 旋转 |
+| G / Shift+G | 显示/隐藏坐标轴：移动 / 旋转（默认不显示；选中零件不再自动出现坐标轴）|
+| W / E | 坐标轴显示时切换移动 / 旋转 |
+| M | 配合工具（两次点击：先点要移动零件的面，再点目标零件的面）；Enter 确定，Esc 取消 |
+| Ctrl+单击 / Shift+单击 | 多选零件（多选后可组合、复制、镜像、一起拖动）|
+| Ctrl+G / Ctrl+Shift+G | 组合 / 取消组合（单击组内任一零件即选中整组）|
+| 运行时自定义按键 | 在关节编辑器中绑定（如 W/S 驱动后轮、A/D 转向），按住生效 |
 | F | 有选中零件时聚焦到该零件，否则适应视图 |
 | Tab（拖动吸附时） | 切换连接类型 |
 | Space / Del / Esc / Ctrl+Z·Y / Ctrl+D / Ctrl+S | 运行暂停 / 删除（多选时删除全部）/ 取消 / 撤销重做 / 复制 / 保存 |
@@ -69,6 +77,37 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 新零件：**轴承座**（中心高 42.4 mm，与默认电机轴高一致）、**转向叉(前轮)**。默认轮半径改为 80 mm，方便用默认电机直接驱动。
 自由（未固定）装配吸附后若有零件穿入地面，整个装配体会自动抬起到地面上。
 
+## 坐标轴（Gizmo）
+选中零件时**不再自动显示**坐标轴，可直接拖动（自动装配）或用 R 旋转。需要精确平移/旋转时按 **G**（移动）或 **Shift+G**（旋转），再按一次隐藏；工具栏“坐标轴”按钮、右键菜单“显示移动坐标轴 / 显示旋转坐标轴”效果相同。
+
+## 导入 3D 零件（STL / OBJ / GLB / GLTF）
+- 工具栏 **📥 导入零件**，或直接把文件**拖进 3D 视图**。支持 STL（二进制和 ASCII）、OBJ、GLB、内嵌资源的 GLTF。
+- 导入对话框：单位（mm / cm / m / inch，STL/OBJ 默认 mm，GLB/GLTF 默认 m，显示换算后的尺寸）、材料（质量 = 体积 × 密度，体积由网格计算，网格不封闭时用凸包体积）、碰撞体（**凸包**：可动；**精确网格(三角网格)**：只能固定于大地，适合底座/场地）、“加入我的零件”。
+- 模型自动居中（包围盒中心），过大的网格自动简化（≤ 40000 三角形），凸包 ≤ 200 点。
+- 自动连接点：包围盒 6 个面中心（面贴合）+ 中心；任意面都可作为“面”参与吸附。
+- **自定义连接点**：选中导入零件 → 属性面板“＋ 在表面添加连接点”（或工具栏“＋连接点”），点击模型表面，选择类型（孔 / 轴 / 安装面），连接点沿表面法线方向；属性面板列出并可删除。
+- 几何数据随保存文件（JSON）一起保存，读取、设为初始状态、撤销/重做都保留；组件栏显示 ◆ 图标。
+- **组件库：我的零件**：勾选“加入我的零件”后出现在零件库“我的零件”一栏（保存在浏览器 localStorage），可像普通零件一样拖入，✕ 移除。
+
+## 通用装配工具
+- **沿杆 / 板任意位置吸附**：轮、齿轮、连杆孔、轴销等可以吸到连杆杆身任意位置（5 mm 网格）；板的**全部 6 个面**、滑块/底座/导入零件的各个面都可作为安装面（面贴合，默认固定，可 Tab 切换为铰链/滑动/球铰）。离散连接点优先于“任意位置”。
+- **配合（M）**：两次点击——第一次点要移动的零件的面（或连接点），第二次点目标零件的面。移动零件使两面贴合（法线相对），然后在顶部工具条调整：类型（固定/铰链/滑动/球铰）、轴线（法向/X/Y/Z）、偏移（mm，沿法向）、绕法向角度、“同向”，点“确定”提交（一次撤销）。导入零件同样适用。
+- **关节编辑器**（属性面板连接卡片 → “限位 / 驱动(电机) / 弹簧阻尼 / 按键”）：
+  - 类型、轴线（X/Y/Z/自定义、反转）、角度或行程限位
+  - 任意关节的 **弹簧刚度 + 平衡位置 + 阻尼**（例如滑动副做悬架）
+  - **内置电机**（铰链/滑动副）：模式“速度”（rpm 或 mm/s，最大扭矩/力）、“扭矩”、“位置/舵机”（目标角度或位置）
+  - **按键绑定**：点“正向键”/“反向键”框再按一个键（如 W 和 S、A 和 D）。运行时：速度模式按键时以 ±目标速度驱动、松开滑行；舵机模式按住转到 ±目标角，松开回中。状态栏显示“键盘控制：A / D / W / S”。
+- **组合 / 复制 / 镜像**：Ctrl/Shift+单击 多选（或单击装配体标题），属性面板出现多选面板：组合、取消组合、复制（含内部连接，Ctrl+D 亦可）、镜像（选择镜像平面 X/Y/Z 和位置；可选“含外部连接”，镜像后会自动与原来连接的零件建立对应连接）。镜像后铰链轴方向按镜像规则反向、限位对调；导入零件生成镜像几何。
+
+## 用通用零件搭一辆四轮车（示例“四轮小车(通用零件装配)”就是这样搭出来的）
+1. 拖入 **板** 作为车架（如 500×20×240 mm，铝）。
+2. 拖入 **滑块**，按 **M** 配合：先点滑块侧面，再点车架侧面靠前的位置 → 类型选“滑动”、轴线 Y（竖直）→ 确定。关节编辑器里设 **弹簧刚度**（如 1500 N/m）、阻尼 60、行程限位 ±25 mm → 悬架。
+3. 再拖一个滑块（转向节），配合到悬架滑块外侧面，类型“铰链”、轴线 Y；关节编辑器设限位 ±30°、驱动“位置/舵机”目标 22°，绑定 **A / D**。
+4. 拖入 **轮**（r 60 mm），配合到转向节外侧面，类型“铰链”、轴线“法向”。
+5. 后部同样：滑块（悬架）+ 轮；在后轮铰链的驱动里选“速度”，设转速和最大扭矩，绑定 **W / S**（方向不对就“反转”轴或交换按键）。
+6. Ctrl+单击选中一侧的悬架块、转向节、两个轮 → Ctrl+G 组合 → 多选面板“镜像”，平面 Z、位置 0，勾选“含外部连接” → 另一侧自动生成并连到车架（按键绑定一起复制；镜像侧的转向如方向相反，在关节编辑器点“反转”）。
+7. ▶ 运行：W 前进，S 后退，A/D 转向。示例中 2 秒约行驶 1.4 m，带 A 转向约 45°，越过“减速带”时车身保持水平，无 NaN。
+
 ## 修改连接
 - **属性面板**：选中零件，“连接”列表列出它的每个连接；点击连接标记（彩色小标记，总是显示在最上层）也会打开该连接。每个连接可以：
   - 类型下拉框：铰链 / 滑动副 / 固定连接 / 球铰 / 螺旋副；传动（齿轮啮合、皮带等）有“啮合/启用”开关
@@ -100,12 +139,17 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 
 ## 局限
 - 螺旋副（作为连接类型）用速度级耦合实现（与齿轮等传动相同），长时间运行会有极小漂移。
-- 平面安装面只在板/底座顶面和连杆正反面；板的底面不能直接安装。
-- 转向叉是被动转向（带回正），没有方向盘/舵机控制；可用连接的“驱动”或“限位”锁定。
+- 转向叉是被动转向（带回正）；需要键控转向请用关节编辑器的“位置/舵机”驱动 + 按键绑定。
+- 导入：不识别圆柱孔/轴（只有包围盒面和手动添加的连接点）；GLTF 外部 .bin / 贴图不支持（请用 GLB 或内嵌 GLTF），不导入材质颜色；精确网格碰撞体只能固定于大地；导入零件的尺寸只能整体缩放。
+- 同一关节上启用驱动时，驱动代替该关节的弹簧（舵机本身就是弹簧+阻尼）。
+- 没有差速器耦合；两个后轮各自由按键驱动（速度模式下相当于两台电机）。
+- 配合偏移不为 0 时，连接锚点位于两零件之间的空隙中（连接审计会显示间隙）。
+- 镜像的舵机/电机方向按几何镜像，按键语义可能需要在镜像侧“反转”一次。
+- 组合只是选择分组（一起选中/移动/复制/镜像），不是刚性连接；需要刚性请用固定连接。
 - 两个对置电机默认转向相反，需要对其中一个“反转轴”（三轮车示例已设置）。
 - 右键菜单最多列出 5 个连接，更多请用属性面板。
 - 隐藏/锁定状态保存在模型 JSON 中，但本身不产生撤销步骤；隐藏零件的连接标记仍显示。
-- 组件栏的分组按“是否有连接/传动”划分，不能手动建立自定义分组或拖动排序。
+- 组件栏的分组按“是否有连接/传动”划分（Ctrl+G 组合只影响选择），不能拖动排序。
 
 ## 修改尺寸（连接自动保持贴合）
 在属性面板修改任何尺寸（轴/丝杠/蜗杆的长度和半径、连杆孔距/宽/厚、板的长宽厚、轮/齿轮/带轮/链轮的半径·齿数·模数、滑块、底座、轴承座、电机等）后，所有连接点会自动重新计算并重新对齐，不会留下间隙（最大间隙 < 0.5 mm，否则拒绝修改）。
@@ -123,6 +167,3 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - **齿轮啮合**：改齿数/模数（或蜗杆节圆半径、齿条高度）后，啮合的另一侧移动到精确的新中心距（优先移动对方齿轮所在的、可移动的一侧，连同其轴；其在固定箱体上的安装孔随之移动；多级齿轮会依次联动），直齿轮重新对齿相位；传动比按新几何重新计算。皮带/链条的长度自动随带轮位置/半径更新，速比同步更新。
 - **无法装配时**：例如四连杆改成无法闭合的连杆长度，会提示“无法修改 … 的尺寸：修改后连接无法全部重新对齐（最大间隙 x mm，机构在该尺寸下无法装配），已恢复原尺寸。可先拆开一个连接再修改。”，模型保持不变、无间隙。
 - 限制：锥齿轮改尺寸后啮合位置不自动调整（会提示）；两个零件模数不同仍会放到节圆相切的位置但会提示“模数不同”；被一根刚性轴跨接的两个固定支承（如小车前轴两轴承座）不能单独改其中一个的中心高或把板缩到小于跨距（拒绝修改）；场景中没有专门的拉伸手柄，尺寸修改通过属性面板（输入、微调箭头或拖动标签）。
-
-## 源码与构建
-源码在 `build/src/`。在仓库根目录执行 `cd build && npm install && ./build.sh` 生成根目录的 `index.html`。测试用 `node tests/run-tests.js`（需要本机 Chrome 和 puppeteer-core）。

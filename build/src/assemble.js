@@ -1,6 +1,6 @@
 // Snap-to-assemble rules: connectors per part + rule table + mesh placement.
 import * as THREE from 'three';
-import { pitchRadius } from './parts.js';
+import { pitchRadius, DEFS } from './parts.js';
 import { analyze } from './physics.js';
 
 const v3 = a => new THREE.Vector3(a[0], a[1], a[2]);
@@ -10,17 +10,40 @@ export const SNAP_PX = 42;
 
 /** typed connection points (local frame). side: 1 = on the face pointing along a, 0 = centred, 'auto' = either side */
 export function connectors(P) {
+  const base = baseConnectors(P);
+  // user-placed connectors (any part, typically imported parts): 孔 hole / 轴 pin / 安装面 mount
+  if (P.cons) for (const c of P.cons) {
+    if (c.role === 'mount') base.push({ n: c.n, role: 'mount', plane: true, p: c.p, a: c.a, u: anyPerp(c.a), hu: 0.002, hv: 0.002, custom: true });
+    else base.push({ n: c.n, role: c.role === 'pin' ? 'pin' : 'hole', p: c.p, a: c.a, side: 1, half: 0, custom: true });
+  }
+  return base;
+}
+export function anyPerp(a) { const v = v3(a).normalize(), r = Math.abs(v.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0); return r.sub(v.multiplyScalar(r.dot(v))).normalize().toArray(); }
+/** the six faces of a centred box as planar mount connectors */
+export function boxFaces(hx, hy, hz, names = ['顶面', '底面', '+X面', '-X面', '+Z面', '-Z面']) {
+  return [
+    { n: names[0], role: 'mount', plane: true, p: [0, hy, 0], a: [0, 1, 0], u: [1, 0, 0], hu: hx, hv: hz },
+    { n: names[1], role: 'mount', plane: true, p: [0, -hy, 0], a: [0, -1, 0], u: [1, 0, 0], hu: hx, hv: hz },
+    { n: names[2], role: 'mount', plane: true, p: [hx, 0, 0], a: [1, 0, 0], u: [0, 0, 1], hu: hz, hv: hy },
+    { n: names[3], role: 'mount', plane: true, p: [-hx, 0, 0], a: [-1, 0, 0], u: [0, 0, 1], hu: hz, hv: hy },
+    { n: names[4], role: 'mount', plane: true, p: [0, 0, hz], a: [0, 0, 1], u: [1, 0, 0], hu: hx, hv: hy },
+    { n: names[5], role: 'mount', plane: true, p: [0, 0, -hz], a: [0, 0, -1], u: [1, 0, 0], hu: hx, hv: hy }];
+}
+function baseConnectors(P) {
   const d = P.d, t = P.type;
+  if (t === 'mesh') { const b = DEFS.mesh.pts(d), h = [b[3].p[0], b[1].p[1], b[5].p[2]]; return boxFaces(h[0], h[1], h[2]); }
   if (t === 'base') { const y = d.h / 2 - Math.min(0.03, d.h / 4); return [
     { n: '轴销(前)', role: 'pin', p: [0, y, d.dp / 2], a: [0, 0, 1], side: 1 },
     { n: '轴销(后)', role: 'pin', p: [0, y, -d.dp / 2], a: [0, 0, -1], side: 1 },
     { n: '顶面', role: 'mount', plane: true, p: [0, d.h / 2, 0], a: [0, 1, 0], u: [1, 0, 0], hu: d.w / 2, hv: d.dp / 2 },
-    { n: '顶面导轨', role: 'rail', line: true, p: [0, d.h / 2, 0], a: [1, 0, 0], nrm: [0, 1, 0], len: d.w }]; }
+    { n: '顶面导轨', role: 'rail', line: true, p: [0, d.h / 2, 0], a: [1, 0, 0], nrm: [0, 1, 0], len: d.w },
+    ...boxFaces(d.w / 2, d.h / 2, d.dp / 2).slice(2)]; }
   if (t === 'plate' || t === 'wall') {
     const c = [
       { n: '顶面', role: 'mount', plane: true, p: [0, d.h / 2, 0], a: [0, 1, 0], u: [1, 0, 0], hu: d.w / 2, hv: d.dp / 2 },
       { n: '导轨', role: 'rail', line: true, p: [0, d.h / 2, 0], a: [1, 0, 0], nrm: [0, 1, 0], len: d.w }];
     if (t === 'plate') {
+      c.push(...boxFaces(d.w / 2, d.h / 2, d.dp / 2).slice(1));
       // side-face connection points (corners + evenly spaced along the long edges, plus the two end faces)
       const n = Math.max(1, Math.round(d.np != null ? d.np : 3)), m = Math.min(0.02, d.w / 4);
       for (let i = 0; i < n; i++) { const x = n === 1 ? 0 : -d.w / 2 + m + (d.w - 2 * m) * i / (n - 1);
@@ -33,6 +56,7 @@ export function connectors(P) {
     { n: '端孔A', role: 'hole', p: [-d.L / 2, 0, 0], a: [0, 0, 1], half: d.t / 2, side: 'auto' },
     { n: '端孔B', role: 'hole', p: [d.L / 2, 0, 0], a: [0, 0, 1], half: d.t / 2, side: 'auto' },
     { n: '中点', role: 'hole', p: [0, 0, 0], a: [0, 0, 1], half: d.t / 2, side: 'auto' },
+    { n: '杆身', role: 'holeLine', line: true, p: [0, 0, 0], a: [1, 0, 0], jax: [0, 0, 1], len: d.L, half: d.t / 2, side: 'auto' },
     { n: '正面', role: 'mount', plane: true, p: [0, 0, d.t / 2], a: [0, 0, 1], u: [1, 0, 0], hu: d.L / 2, hv: d.w / 2 },
     { n: '背面', role: 'mount', plane: true, p: [0, 0, -d.t / 2], a: [0, 0, -1], u: [1, 0, 0], hu: d.L / 2, hv: d.w / 2 }];
   if (t === 'bearing') return [
@@ -54,7 +78,7 @@ export function connectors(P) {
     { n: '底座', role: 'motorBase', p: [0, -d.s * 0.53, 0], a: [0, -1, 0] }];
   if (HUBS.includes(t)) return [{ n: '中心孔', role: 'hub', p: [0, 0, 0], a: [0, 0, 1], half: (d.t || 0.02) / 2 }];
   if (t === 'ball') return [{ n: '球心', role: 'ball', p: [0, 0, 0], a: [0, 0, 1] }];
-  if (t === 'block') return [{ n: '底面', role: 'slider', p: [0, -d.h / 2, 0], a: [0, -1, 0], len: d.w }];
+  if (t === 'block') return [{ n: '底面', role: 'slider', p: [0, -d.h / 2, 0], a: [0, -1, 0], len: d.w }, ...boxFaces(d.w / 2, d.h / 2, d.dp / 2)];
   if (t === 'nut') return [{ n: '中心孔', role: 'nut', p: [0, 0, 0], a: [0, 0, 1], len: d.L }];
   return [];
 }
@@ -73,11 +97,21 @@ const RULES = {
   'hub>bore': { j: 'revolute', label: '铰链 (轮装在轴承上)' }, 'hole>bore': { j: 'revolute', label: '铰链' },
   'ball>hole': { j: 'fixed', label: '固定连接' },
   // line targets
+  // anywhere along a rod (5 mm grid)
+  'hole>holeLine': { j: 'revolute', label: '铰链 (杆身任意位置)', weak: true }, 'hub>holeLine': { j: 'revolute', label: '铰链 (杆身任意位置)', weak: true },
+  'pin>holeLine': { j: 'revolute', label: '铰链 (杆身任意位置)', weak: true }, 'shaftOut>holeLine': { j: 'revolute', label: '铰链 (电机驱动)', weak: true },
+  'axleEnd>holeLine': { j: 'revolute', label: '轴插入杆身', weak: true, alts: ['revolute', 'fixed'] },
+  // anywhere on any planar face (5 mm grid)
+  'face>mount': { j: 'fixed', label: '面贴合', weak: true, alts: ['fixed', 'revolute', 'prismatic', 'spherical'] },
+  'hub>mount': { j: 'revolute', label: '铰链 (装在面上)', weak: true, out: true, alts: ['revolute', 'fixed'] },
+  'hole>mount': { j: 'revolute', label: '铰链 (装在面上)', weak: true, out: true, alts: ['revolute', 'fixed'] },
+  'pin>mount': { j: 'revolute', label: '铰链 (装在面上)', weak: true, out: true, alts: ['revolute', 'fixed'] },
+  'axleEnd>mount': { j: 'revolute', label: '轴垂直插在面上', weak: true, alts: ['revolute', 'fixed'] },
   'hub>axleLine': { j: 'fixed', label: '固定在轴上', alts: ['fixed', 'revolute'] }, 'slider>rail': { j: 'prismatic', label: '滑动副' }, 'nut>screwLine': { j: 'screw', label: '螺旋副' },
 };
 
 export const JNAME = { revolute: '铰链', prismatic: '滑动副', fixed: '固定连接', spherical: '球铰', helical: '螺旋副' };
-const ALTS = { revolute: ['revolute', 'fixed', 'spherical'], fixed: ['fixed', 'revolute'], prismatic: ['prismatic', 'fixed'] };
+const ALTS = { revolute: ['revolute', 'fixed', 'spherical', 'prismatic'], fixed: ['fixed', 'revolute', 'prismatic', 'spherical'], prismatic: ['prismatic', 'fixed', 'revolute'] };
 export function altsOf(rule) { return rule.alts || ALTS[rule.j] || null; }
 
 /** does the rigid group of part `id` have a joint of `kinds` to something outside the group (or the world)? */
@@ -104,17 +138,29 @@ export function findAssembly(ctx) {
     for (const tc of connectors(T)) {
       const tW = v3(tc.p).applyQuaternion(tq).add(tp), aT = v3(tc.a).applyQuaternion(tq).normalize();
       for (const mc of mcs) {
-        const rule = RULES[mc.role + '>' + tc.role]; if (!rule) continue;
+        const rule = RULES[(mc.plane ? 'face' : mc.role) + '>' + tc.role]; if (!rule) continue;
         const mcW = mcWorld(mc), aM = v3(mc.a).applyQuaternion(q0).normalize();
-        let q, anchor;
+        let q, anchor, jaxis = null, slideAx = null, jointAt = null, rot = 0;
         if (tc.plane) {
           // planar mount face: anchor = probe point projected onto the face (5 mm grid, clamped to the face)
           const U = v3(tc.u).applyQuaternion(tq).normalize(), V = aT.clone().cross(U).normalize(), pl = new THREE.Plane().setFromNormalAndCoplanarPoint(aT, tW);
           let pr = null; if (ctx.ray) { pr = new THREE.Vector3(); if (!ctx.ray.intersectPlane(pl, pr)) pr = ctx.ray.closestPointToPoint(tW, new THREE.Vector3()); } else pr = mcW.clone();
           const dv = pr.clone().sub(tW), mg = 0.004, g5 = x => Math.round(x / 0.005) * 0.005;
           const cu = Math.max(-tc.hu + mg, Math.min(tc.hu - mg, g5(dv.dot(U)))), cv = Math.max(-tc.hv + mg, Math.min(tc.hv - mg, g5(dv.dot(V))));
-          anchor = tW.clone().addScaledVector(U, cu).addScaledVector(V, cv);
-          q = new THREE.Quaternion().setFromUnitVectors(aM, aT.clone().negate()).multiply(q0);
+          anchor = tW.clone().addScaledVector(U, cu).addScaledVector(V, cv); slideAx = U;
+          if (rule.out) { const dir = aM.dot(aT) >= 0 ? aT : aT.clone().negate(); q = new THREE.Quaternion().setFromUnitVectors(aM, dir).multiply(q0); jointAt = anchor.clone(); anchor.addScaledVector(aT, (mc.half || 0) + 0.0005); }
+          else { q = new THREE.Quaternion().setFromUnitVectors(aM, aT.clone().negate()).multiply(q0); rot = Math.acos(Math.max(-1, Math.min(1, -aM.dot(aT)))); }
+        } else if (tc.line && tc.jax) {
+          // hole line along a bar: any position on a 5 mm grid, then behaves like a hole whose axis is jax
+          const J = v3(tc.jax).applyQuaternion(tq).normalize(), hl = tc.len / 2, onSeg = new THREE.Vector3();
+          const a0 = tW.clone().addScaledVector(aT, -hl), a1 = tW.clone().addScaledVector(aT, hl);
+          if (ctx.ray) ctx.ray.distanceSqToSegment(a0, a1, null, onSeg); else new THREE.Line3(a0, a1).closestPointToPoint(mcW, true, onSeg);
+          const sAl = Math.max(-hl, Math.min(hl, Math.round(onSeg.clone().sub(tW).dot(aT) / 0.005) * 0.005)), base = tW.clone().addScaledVector(aT, sAl);
+          const dir = rule.align === 'anti' ? J.clone().negate() : (aM.dot(J) >= 0 ? J.clone() : J.clone().negate());
+          q = new THREE.Quaternion().setFromUnitVectors(aM, dir).multiply(q0);
+          const pr = probeNear(base, mcW); const side = Math.sign(pr.clone().sub(base).dot(J)) || 1;
+          anchor = base.clone().addScaledVector(J, side * ((tc.half || 0) + (mc.half || 0) + 0.0005)); jaxis = J;
+          if (rule.j === 'revolute' && mc.role === 'axleEnd') anchor = base.clone();
         } else if (tc.line) {
           // closest point on the target line segment
           const hl = Math.max(0, tc.len / 2 - (mc.len || (mc.half || 0) * 2) / 2), a0 = tW.clone().addScaledVector(aT, -hl), a1 = tW.clone().addScaledVector(aT, hl);
@@ -135,9 +181,9 @@ export function findAssembly(ctx) {
         }
         const p = anchor.clone().sub(v3(mc.p).applyQuaternion(q));
         const dist = sdist(anchor, mcW);
-        const axis = aT.clone(), A = anchor.clone();
+        const axis = (jaxis || aT).clone(), A = (jointAt || anchor).clone(), sAx = slideAx ? slideAx.clone() : null;
         const alts = altsOf(rule);
-        cands.push({ dist, p, q, label: rule.label, marker: A, target: T, kind: rule.j, mc: mc.n, tc: tc.n, alts,
+        cands.push({ dist, p, q, label: rule.label, marker: A, target: T, kind: rule.j, mc: mc.n, tc: tc.n, alts, weak: !!rule.weak, rot,
           apply: (app, jt) => {
             if (rule.unfix) mover.fixed = false;
             if (rule.j === 'screw') {
@@ -147,7 +193,7 @@ export function findAssembly(ctx) {
               return app.addCoupling('screw', T, mover);
             }
             const t = jt || rule.j;
-            return app.addJoint(t, T, mover, A, axis, t === rule.j && rule.over ? Object.assign({}, rule.over) : {});
+            return app.addJoint(t, T, mover, A, t === 'prismatic' && sAx && rule.j !== 'prismatic' ? sAx : axis, t === rule.j && rule.over ? Object.assign({}, rule.over) : {});
           } });
       }
     }
@@ -157,7 +203,8 @@ export function findAssembly(ctx) {
   }
   let best = null, near = null;
   // nearest on screen; near-ties (same 8px bucket) go to the point closer to the camera
-  const key = c => Math.floor(c.dist / 8) * 1000 + (ctx.camPos ? c.marker.distanceTo(ctx.camPos) : 0);
+  // "anywhere" connectors (planes / bar lines) give way to discrete connection points within ~24 px
+  const key = c => Math.floor((c.dist + (c.weak ? 24 : 0)) / 8) * 1000 + (ctx.camPos ? c.marker.distanceTo(ctx.camPos) : 0) + (c.rot || 0) * 0.3; // least re-orientation wins ties
   for (const c of cands) { if (!near || c.dist < near.dist) near = c; if (c.dist <= SNAP_PX && (!best || key(c) < key(best) - 1e-6)) best = c; }
   return { best, near, cands };
 }
