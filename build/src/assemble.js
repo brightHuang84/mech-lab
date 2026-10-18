@@ -209,7 +209,7 @@ export function findAssembly(ctx) {
   return { best, near, cands };
 }
 
-function ensureRot(app, P, axisW, center) { if (!hasJoint(app.M, P.id, ['revolute'])) app.addJoint('revolute', P, null, center.clone(), axisW.clone()); }
+function ensureRot(app, P, axisW, center) { if (!hasJoint(app.M, P.id, ['revolute'])) app.addJoint('revolute', P, null, center.clone(), axisW.clone(), { auto: true }); }
 function ensurePri(app, P, axisW, center) { if (!hasJoint(app.M, P.id, ['prismatic'])) app.addJoint('prismatic', P, null, center.clone(), axisW.clone()); }
 const planeProj = (v, n) => v.clone().addScaledVector(n, -v.dot(n));
 

@@ -9,6 +9,7 @@ import { resizeModel, maxJointGap } from './resize.js';
 import { installExtra, keyLabel } from './extra.js';
 import { GEO } from './parts.js';
 import { installAsm } from './asmpanel.js';
+import { installMove } from './move.js';
 
 const $ = id => document.getElementById(id);
 const tv3 = v => new THREE.Vector3(v.x, v.y, v.z), tq4 = q => new THREE.Quaternion(q.x, q.y, q.z, q.w);
@@ -121,6 +122,7 @@ class App {
   autoName(type) { const L = this.shortLabel(type), re = new RegExp('^' + L.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' (\\d+)$'); let n = 0; for (const P of this.M.parts) { const m = re.exec(P.name || ''); if (m) n = Math.max(n, +m[1]); } return L + ' ' + (n + 1); }
   addJoint(type, A, B, anchorW, axisW, over = {}) {
     const W = V3(anchorW.toArray ? anchorW.toArray() : anchorW), n = V3(axisW.toArray ? axisW.toArray() : axisW).normalize();
+    if (!isForce({ type }) && this.findDupJoint) { const d = this.findDupJoint(type, A, B, W); if (d) { this._dupJoint = d.id; return d; } } // never stack an identical joint twice
     const j = Object.assign({ id: 'j' + (this.M.nid++), type, a: A.id, b: B ? B.id : null, la: ptL(A, W).toArray(), lb: B ? ptL(B, W).toArray() : W.toArray(), axa: axL(A, n).toArray() }, over);
     if (type === 'spring') Object.assign(j, { k: 300, c: 0.5 }, over); if (type === 'damper') Object.assign(j, { c: 20 }, over);
     this.M.joints.push(j); return j;
@@ -132,7 +134,7 @@ class App {
     this.M.couplings.push(c); return c;
   }
   snapshot() { return JSON.stringify(this.M); }
-  commit() { this.undoS.push(this.lastSnap || this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.redoS = []; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.updButtons(); }
+  commit() { if (this.mode === 'edit' && this.pruneAutoHinges) this.pruneAutoHinges(); this.undoS.push(this.lastSnap || this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.redoS = []; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.updButtons(); }
   beginEdit() { if (this.asm && !this._asmBusy) this.asmCancel(true); if (this.mode !== 'edit') this.reset(); this.lastSnap = this.snapshot(); }
   undo() { if (this.asm) return this.asmCancel(); if (this.mode !== 'edit') this.reset(); if (!this.undoS.length) return; this.redoS.push(this.snapshot()); this.M = JSON.parse(this.undoS.pop()); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已撤销'); }
   redo() { if (this.asm) this.asmCancel(true); if (this.mode !== 'edit') this.reset(); if (!this.redoS.length) return; this.undoS.push(this.snapshot()); this.M = JSON.parse(this.redoS.pop()); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已重做'); }
@@ -373,7 +375,8 @@ class App {
     if (this.tc.axis) return; // gizmo handle under the cursor
     const h = this.pickAt(e); if (!h.pid) return;
     if (this.part(h.pid).locked) return; // locked: click selects, drag does nothing
-    this.orbit.enabled = false; this.pd = { pid: h.pid, x: e.clientX, y: e.clientY, hit: h.point.clone(), started: false };
+    // modifiers are read at press time: Alt = move only this part (detach it), Ctrl/⌘ = drag along the joints (articulate), Shift = vertical
+    this.orbit.enabled = false; this.pd = { pid: h.pid, x: e.clientX, y: e.clientY, hit: h.point.clone(), started: false, alt: !!(e.altKey || this.altDown), art: !!(e.ctrlKey || e.metaKey), vert: !!e.shiftKey };
   }
   ptrMove(e) {
     const D = this.pd; if (!D) return;
@@ -382,25 +385,39 @@ class App {
   }
   ptrUp(e) { const D = this.pd; if (!D) return; this.pd = null; this.orbit.enabled = true; if (D.started) this.directEnd(D); } // (the canvas click handler already ran for this pointerup; setting tcDragged here used to swallow the NEXT click)
   directStart(e) {
-    const D = this.pd; this.lastSnap = this.snapshot(); const multi = (this.msel && this.msel.size > 1 && this.msel.has(D.pid)) ? [...this.msel] : null; this.select({ p: D.pid }, !!multi); this.tc.detach(); this.snapAlt = 0; this.rotInfo = ''; this.orbit.enableZoom = false;
-    const an = analyze(this.M), g = an.groupOf[D.pid], comp = an.comps[an.compOf[D.pid]];
-    if (multi) { const ids = new Set(); let anch = false; for (const id of multi) { const c = an.comps[an.compOf[id]]; if (!c) continue; if (c.anchored) anch = true; c.parts.forEach(p => ids.add(p.id)); } if (!anch) { D.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(this.cam.getWorldDirection(new THREE.Vector3()).negate(), D.hit); D.start = {}; for (const P of this.M.parts) D.start[P.id] = { p: V3(P.p), q: Q4(P.q) }; this.dragPoses = {}; this.directRigid([...ids], D.hit); D.multi = true; return; } }
-    D.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(this.cam.getWorldDirection(new THREE.Vector3()).negate(), D.hit);
-    D.start = {}; for (const P of this.M.parts) D.start[P.id] = { p: V3(P.p), q: Q4(P.q) };
-    this.dragPoses = {};
-    if (!comp.anchored || g.static) this.directRigid(comp.parts.map(p => p.id), D.hit);
-    else {
+    const D = this.pd; this.lastSnap = this.snapshot(); const multi = !D.alt && !!(this.msel && this.msel.size > 1 && this.msel.has(D.pid)); this.select({ p: D.pid }, multi); this.tc.detach(); this.snapAlt = 0; this.rotInfo = ''; this.orbit.enableZoom = false;
+    D.start = this.posesOf(); this.dragPoses = {}; D.multi = multi;
+    if (D.art) { // Ctrl/⌘+drag: the old constrained drag — pull the part along its hinges / sliders (pull hard to detach)
+      const an = analyze(this.M), g = an.groupOf[D.pid], comp = an.comps[an.compOf[D.pid]];
+      D.plane = new THREE.Plane().setFromNormalAndCoplanarPoint(this.cam.getWorldDirection(new THREE.Vector3()).negate(), D.hit);
+      if (!comp.anchored || g.static) { this.directRigid(comp.parts.map(p => p.id), D.hit); return; }
       const s = D.sim = new Sim(this.M, { edit: true }), body = s.pb[D.pid].body;
       const cb = D.cursor = s.world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(D.hit.x, D.hit.y, D.hit.z));
       const gl = s.toBody(body, D.hit);
       D.spring = s.world.createImpulseJoint(RAPIER.JointData.spring(0, 600, 60, { x: 0, y: 0, z: 0 }, { x: gl.x, y: gl.y, z: gl.z }), cb, body, true);
       D.grabL = gl; D.body = body;
-      this.msg('拖动：零件按连接约束运动（绕铰链转动 / 沿导轨滑动）；用力拉开可拆开');
+      this.msg('Ctrl+拖动：零件按连接约束运动（绕铰链转动 / 沿导轨滑动）；用力拉开可拆开');
+      return;
     }
+    let ids;
+    if (D.alt) { ids = [D.pid]; const lk = this.lockedIn(ids); if (!lk.length) { D.detached = this.detachJoints(D.pid); if (D.detached) this.rebuild(true); } }
+    else ids = this.moveSet(D.pid);
+    const lk = this.lockedIn(ids); if (lk.length) { D.blocked = true; this.msg(lk.map(x => x.name).join('、') + ' 已锁定，装配体无法移动（在组件栏点 🔒 解锁，或 Alt+拖动 只移动这个零件）', true); return; }
+    D.plane = this.dragPlane(D.hit, D.vert); D.ids = ids;
+    this.directRigid(ids, D.hit);
+    this.msg(D.alt ? (D.detached ? '已拆开 ' + this.part(D.pid).name + '（移除 ' + D.detached + ' 个连接），只移动这个零件；靠近连接点可重新装配' : '只移动 ' + this.part(D.pid).name + '（Alt）')
+      : (ids.length > 1 ? '移动整个装配体（' + ids.length + ' 个零件，连接保持）' : '移动 ' + this.part(D.pid).name) + (D.vert ? ' · 竖直移动' : ' · 沿地面移动（Shift=竖直）') + ' · Alt+拖动=只移动此零件 · Ctrl+拖动=按连接约束拖动 · 方向键微调');
+  }
+  /** drag plane: horizontal through the grab point (ground-parallel); Shift = vertical plane facing the camera; edge-on views fall back to the view plane */
+  dragPlane(hit, vert) {
+    const dir = this.cam.getWorldDirection(new THREE.Vector3());
+    if (vert) { const n = new THREE.Vector3(dir.x, 0, dir.z); if (n.lengthSq() < 1e-6) n.set(0, 0, 1); return new THREE.Plane().setFromNormalAndCoplanarPoint(n.normalize().negate(), hit); }
+    if (Math.abs(dir.y) < 0.2) return new THREE.Plane().setFromNormalAndCoplanarPoint(dir.negate(), hit);
+    return new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), hit);
   }
   directRigid(ids, grabW) { const D = this.pd || this.dd; D.rigid = ids; D.grabOff = V3(this.part(D.pid).p).sub(grabW); D.q0 = Q4(this.part(D.pid).q); }
   directMove(e) {
-    const D = this.pd; if (!D || !D.started) return; D.lastEv = { clientX: e.clientX, clientY: e.clientY, altKey: e.altKey };
+    const D = this.pd; if (!D || !D.started || D.blocked) return; D.lastEv = { clientX: e.clientX, clientY: e.clientY, altKey: e.altKey };
     const T = new THREE.Vector3(); if (!this.rayOf(e).intersectPlane(D.plane, T)) return;
     if (D.sim) {
       D.cursor.setNextKinematicTranslation({ x: T.x, y: T.y, z: T.z }); D.sim.relax(6);
@@ -409,7 +426,7 @@ class App {
       if (gw.distanceTo(T) > 0.12) this.detachDuring(D, T);
     }
     if (D.rigid) {
-      const pos = T.clone().add(D.grabOff), s0 = D.start[D.pid];
+      const pos = T.clone().add(D.grabOff), s0 = D.start[D.pid]; if (D.vert) { pos.x = s0.p.x; pos.z = s0.p.z; }
       const set = (p, q) => { const dq = q.clone().multiply(s0.q.clone().invert()); for (const id of D.rigid) { const s = D.start[id]; this.dragPoses[id] = { p: s.p.clone().sub(s0.p).applyQuaternion(dq).add(p), q: dq.clone().multiply(s.q) }; } };
       set(pos, D.q0); D.best = null;
       if (this.autoOn(e)) {
@@ -434,9 +451,12 @@ class App {
   }
   directEnd(D) {
     let res = null;
+    if (D.blocked) { this.rotInfo = ''; this.orbit.enableZoom = true; this.dragPoses = null; this.clearPreview(); this.syncPoses(); return; }
     if (D.rigid) {
       for (const id of D.rigid) { const ps = this.dragPoses[id]; if (!ps) continue; const P = this.part(id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); }
+      this.fixWorldAnchors(D.start, D.rigid); // ground-fixed parts take their world anchors along
       if (D.best) { const P = this.part(D.pid); res = this.applyAssembly(D.best, P, []); if (res) this.liftComp(P.id); }
+      else if (!D.art) this.groundLift(D.rigid);
     } else if (D.sim) {
       const s = D.sim; s.world.removeImpulseJoint(D.spring, true);
       for (let i = 0; i < 60 && s.maxGap() > 1e-4; i++) s.relax(5);
@@ -461,11 +481,16 @@ class App {
     for (const id in this.objs) { const on = (this.sel && this.sel.p === id) || ms.has(id), hv = this.hoverPid === id; this.objs[id].traverse(o => { if (o.isMesh && o.material.emissive) { o.material.emissive.setHex(hv ? 0xf59e0b : on ? 0x1d4ed8 : o.userData.baseEm); o.material.emissiveIntensity = hv ? 0.45 : on ? 0.35 : 1; } }); }
     this.olSync();
     // the gizmo is never a default state: it belongs to the part it was explicitly switched on for (G / Shift+G / button) and turns off when the selection changes
-    if (this.gizmoOn && (!this.sel || !this.sel.p || this.sel.p !== this._gizmoFor || this.asm || this.mode !== 'edit' || (this.msel && this.msel.size > 1))) { this.gizmoOn = false; this._gizmoFor = null; if (this.updGizmoBtns && $('btnGizmo')) this.updGizmoBtns(); }
-    if (this.gizmoOn && this.sel && this.sel.p && this.mode === 'edit' && this.tool === 'select' && this.part(this.sel.p) && !this.part(this.sel.p).locked) {
-      const P = this.part(this.sel.p); this.proxy.position.copy(V3(P.p)); this.proxy.quaternion.copy(Q4(P.q)); this.tc.attach(this.proxy);
+    if (this.gizmoOn && (!this.sel || !this.sel.p || this.gizKey() !== this._gizmoFor || this.asm || this.mode !== 'edit')) { this.gizmoOn = false; this._gizmoFor = null; if (this.updGizmoBtns && $('btnGizmo')) this.updGizmoBtns(); }
+    const multi = !!(this.msel && this.msel.size > 1);
+    if (this.gizmoOn && this.sel && this.sel.p && this.mode === 'edit' && this.tool === 'select' && this.part(this.sel.p) && !(multi ? this.lockedIn(this.moveSet(this.sel.p, { multi: true })).length : this.part(this.sel.p).locked)) {
+      // multi-selection / group: the gizmo sits at the selection centre, world-aligned, and moves / rotates everything together
+      if (multi) { this.proxy.position.copy(this.selCenter(this.moveSet(this.sel.p, { multi: true }))); this.proxy.quaternion.identity(); }
+      else { const P = this.part(this.sel.p); this.proxy.position.copy(V3(P.p)); this.proxy.quaternion.copy(Q4(P.q)); }
+      this.tc.attach(this.proxy);
     } else this.tc.detach();
   }
+  gizKey() { return this.msel && this.msel.size > 1 ? 'm:' + this.selIds().sort().join(',') : (this.sel && this.sel.p) || null; }
   showPoints() {
     if (this.ptsGroup) this.scene.remove(this.ptsGroup);
     const g = this.ptsGroup = new THREE.Group(); this.scene.add(g);
@@ -483,13 +508,15 @@ class App {
     this.tcDragged = true; this.lastSnap = this.snapshot();
     const pid = this.sel.p, an = analyze(this.M), g = an.groupOf[pid], comp = an.comps[an.compOf[pid]];
     const start = {}; for (const P of this.M.parts) start[P.id] = { p: V3(P.p), q: Q4(P.q) };
-    this.drag = { pid, start, dragPoses: {} }; this.snapAlt = 0;
-    if (!comp.anchored || g.static) { this.drag.rigid = comp.parts.map(p => p.id); }
+    const multi = !!(this.msel && this.msel.size > 1);
+    this.drag = { pid, start, dragPoses: {}, multi, ref: multi ? { p: this.proxy.position.clone(), q: this.proxy.quaternion.clone() } : start[pid] }; this.snapAlt = 0;
+    if (multi) { this.drag.rigid = this.moveSet(pid, { multi: true }); } // gizmo on a multi-selection / group: everything moves / rotates about the selection centre
+    else if (!comp.anchored || g.static) { this.drag.rigid = comp.parts.map(p => p.id); }
     else { this.drag.sim = new Sim(this.M, { edit: true, kinematic: pid }); }
     this.dragPoses = {};
   }
   dragMove(tp, tq) {
-    const D = this.drag; if (!D) return; const s0 = D.start[D.pid];
+    const D = this.drag; if (!D) return; const s0 = D.ref || D.start[D.pid];
     if (D.rigid) {
       const dq = tq.clone().multiply(s0.q.clone().invert());
       for (const id of D.rigid) { const s = D.start[id]; this.dragPoses[id] = { p: s.p.clone().sub(s0.p).applyQuaternion(dq).add(tp), q: dq.clone().multiply(s.q) }; }
@@ -515,6 +542,7 @@ class App {
     if (D.rigid) {
       const sn = Object.keys(this.dragPoses).length && !D.best ? this.findSnap(D.rigid) : null;
       for (const id of D.rigid) { const ps = this.dragPoses[id]; if (!ps) continue; if (sn) ps.p.add(sn.to.clone().sub(sn.from)); const P = this.part(id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); }
+      this.fixWorldAnchors(D.start, D.rigid);
       if (D.best) { D.res = this.applyAssembly(D.best, this.part(D.pid), D.rigid); if (D.res) this.liftComp(D.pid); }
       if (sn) this.msg('已吸附到连接点'); this.clearPreview();
     } else {
@@ -591,13 +619,14 @@ class App {
   rotateSel(dir = 1, deg = 15) {
     if (this.mode !== 'edit') this.reset(); const pid = this.sel && this.sel.p, P = pid && this.part(pid);
     if (!P) { this.msg('先选中一个零件，再按 R 旋转（Shift+R 反向）'); return; }
+    if (this.msel && this.msel.size > 1) return this.rotateSelBy(this.rotAxisName(), dir * deg);
     if (P.locked) { this.msg(P.name + ' 已锁定，无法旋转（在组件栏点 🔒 解锁）', true); return; }
     this.midStart(pid, { clientX: 0, clientY: 0 }); const hinge = !!this.md.hinge; this.midApply(dir * deg); this.midEnd();
     this.msg('已旋转 ' + P.name + ' ' + (dir * deg) + '°' + (hinge ? '（绕铰链）' : '（绕 ' + this.rotAxisName() + ' 轴）') + ' · R / Shift+R');
   }
   midEnd() {
     const D = this.md; this.md = null; this.orbit.enabled = true; this.rotInfo = '';
-    if (D.rigid) { for (const id of D.rigid) { const ps = this.dragPoses[id]; if (ps) { const P = this.part(id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); } } }
+    if (D.rigid) { for (const id of D.rigid) { const ps = this.dragPoses[id]; if (ps) { const P = this.part(id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); } } this.fixWorldAnchors(D.start, D.rigid); }
     else if (D.sim) { const s = D.sim; s.pb[D.pid].body.setBodyType(RAPIER.RigidBodyType.Dynamic, true); for (let i = 0; i < 60 && s.maxGap() > 1e-4; i++) s.relax(5); for (const P of this.M.parts) { const ps = s.partPose(P.id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); } s.free(); }
     this.dragPoses = null; this.clearPreview(); if (Math.abs(D.ang) > 1e-6) this.commit(); this.rebuild(); this.select({ p: D.pid });
   }
@@ -889,6 +918,7 @@ class App {
     if (this.asm && k === 'enter') { e.preventDefault(); this.asmCommit(); return; }
     if (this.asm && k === 'escape') { this.asmCancel(); return; }
     if (k === 'j' && !e.ctrlKey && !e.metaKey && !e.altKey) { this.asmToggle(); return; }
+    if (this.mode === 'edit' && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'pageup', 'pagedown'].includes(k) && !e.ctrlKey && !e.metaKey) { if (this.sel && this.sel.p) { e.preventDefault(); this.nudgeKey(k, e.shiftKey); } return; }
     if (e.code === 'Space') { e.preventDefault(); this.toggleRun(); }
     else if ((e.ctrlKey || e.metaKey) && k === 'g') { e.preventDefault(); if (e.shiftKey) this.ungroupSel(); else this.groupSel(); }
     else if (k === 'g' && !e.ctrlKey && !e.metaKey && !e.altKey) this.toggleGizmo(e.shiftKey ? 'rotate' : null);
@@ -1169,4 +1199,5 @@ class App {
 
 installExtra(App);
 installAsm(App);
+installMove(App, partMinY);
 RAPIER.init().then(() => { window.app = new App(); window.dispatchEvent(new Event('app-ready')); }).catch(e => { console.error(e); document.body.insertAdjacentHTML('beforeend', '<div style="position:fixed;top:40%;left:30%;background:#fee;padding:20px">物理引擎加载失败: ' + e + '</div>'); });

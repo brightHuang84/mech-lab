@@ -12,7 +12,7 @@ module.exports = async function (p, check, OUT) {
     await p.mouse.up(); await frame();
     return p.evaluate(() => app.M.parts[app.M.parts.length - 1].id);
   };
-  const mdrag = async (from, to, steps = 12, button = 'left') => { await p.mouse.move(from[0], from[1]); await p.mouse.down({ button }); await p.mouse.move(to[0], to[1], { steps }); await frame(); await p.mouse.up({ button }); await frame(); };
+  const mdrag = async (from, to, steps = 12, button = 'left', mods = []) => { for (const m of mods) await p.keyboard.down(m); await p.mouse.move(from[0], from[1]); await p.mouse.down({ button }); await p.mouse.move(to[0], to[1], { steps }); await frame(); await p.mouse.up({ button }); for (const m of mods) await p.keyboard.up(m); await frame(); };
   const conn = (id, name) => p.evaluate((id, name) => app._conn(app.part(id), name), id, name);
   const rodAng = rod => p.evaluate(rod => { const R = app.part(rod), a = app._conn(R, '端孔A'), b = app._conn(R, '端孔B'); return Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI; }, rod);
   const jointOf = (a, b) => p.evaluate((a, b) => { const j = app.M.joints.find(j => (j.a === a && j.b === b) || (j.a === b && j.b === a)); return j ? { id: j.id, type: j.type, mod: !!j.mod } : null; }, a, b);
@@ -47,7 +47,7 @@ module.exports = async function (p, check, OUT) {
   await p.evaluate(rod => app.select({ p: rod }), rod); await frame();
   await p.select('#props .jtype', 'revolute'); await frame();
   const jr = await jointOf(base, rod); const b0 = await rodAng(rod); const eb = await scr(await conn(rod, '端孔B'));
-  await mdrag(eb, [eb[0] - 60, eb[1] + 110]); const b1 = await rodAng(rod);
+  await mdrag(eb, [eb[0] - 60, eb[1] + 110], 12, 'left', ['Control']); const b1 = await rodAng(rod);
   check('撤销/重做 每次连接修改 + 改回铰链后可再次转动', ur.u === 'revolute' && ur.r === 'fixed' && jr.type === 'revolute' && Math.abs(b1 - b0) > 15, JSON.stringify({ ur, back: jr.type, dragAngChange: +(b1 - b0).toFixed(2) }));
   // 3. change axis to Y and flip, via panel
   await p.evaluate(rod => app.select({ p: rod }), rod); await frame();

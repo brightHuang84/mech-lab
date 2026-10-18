@@ -61,8 +61,9 @@ export function installExtra(App) {
     if (!mode) this.gizmoOn = !this.gizmoOn;
     else if (this.gizmoOn && this.tc.mode === mode) this.gizmoOn = false;
     else { this.tc.setMode(mode); this.gizmoOn = true; }
-    this._gizmoFor = this.gizmoOn ? this.sel.p : null;
+    this._gizmoFor = this.gizmoOn ? this.gizKey() : null;
     this.updGizmoBtns(); this.updSel();
+    if (this.gizmoOn && this.msel && this.msel.size > 1) { this.msg('已在选中中心显示' + (this.tc.mode === 'rotate' ? '旋转' : '移动') + '坐标轴：' + this.moveSet(this.sel.p, { multi: true }).length + ' 个零件一起移动/旋转（G 隐藏；W 移动 / E 旋转）'); return; }
     this.msg(this.gizmoOn ? '已显示' + (this.tc.mode === 'rotate' ? '旋转' : '移动') + '坐标轴（G 隐藏；W 移动 / E 旋转；选别的零件后自动隐藏）' : '已隐藏坐标轴：直接左键拖动零件移动，R 旋转 15°（G 显示坐标轴）');
   };
   P.updGizmoBtns = function () { const on = this.gizmoOn, m = this.tc.mode; $('btnGizmo').classList.toggle('on', on); $('btnMove').classList.toggle('on', on && m === 'translate'); $('btnRot').classList.toggle('on', on && m === 'rotate'); };
@@ -183,28 +184,41 @@ export function installExtra(App) {
   };
   P.mateApply = function () {
     const S = this.mateS; if (!S) return null; this.M = JSON.parse(S.snap);
-    const j = this.mateCore(S.r1, S.r2, S.o); this.rebuild(true); this.updProps();
-    if (j) this.msg(`配合预览：${this.part(S.r1.pid).name} → ${this.part(S.r2.pid).name}（${({ fixed: '固定', revolute: '铰链', prismatic: '滑动', spherical: '球铰' })[S.o.type]}）。在上方工具条调整偏移/角度后点“确定”`);
+    const j = this.mateCore(S.r1, S.r2, S.o); S.j = j ? j.id : null; S.dup = !!(j && this._dupJoint === j.id); this._dupJoint = null; this.rebuild(true); this.updProps();
+    if (j && S.dup) this.msg('这两个零件在这个位置已经有相同的连接，不会重复添加', true);
+    else if (j) this.msg(`配合预览：${this.part(S.r1.pid).name} → ${this.part(S.r2.pid).name}（${({ fixed: '固定', revolute: '铰链', prismatic: '滑动', spherical: '球铰' })[S.o.type]}）。在上方工具条调整偏移/角度后点“确定”`);
     return j;
   };
-  P.mateCommit = function () { const S = this.mateS; if (!S) return; this.mateS = null; this.lastSnap = S.snap; this.commit(); this.relaxAll(); this.rebuild(); this.showToolBar(); this.msg('✓ 配合完成'); };
+  P.mateCommit = function () {
+    const S = this.mateS; if (!S) return; this.mateS = null;
+    if (!S.j || this.snapshot() === S.snap) { this.M = JSON.parse(S.snap); this.rebuild(); this.showToolBar(); this.msg(this.mateErr || (S.dup ? '已有相同的连接，未重复添加' : '没有建立新的连接'), true); return; }
+    const v = this.validateNew([S.j], Math.abs(S.o.offset || 0) / 2);
+    if (!v.ok) { this.M = JSON.parse(S.snap); this.rebuild(); this.showToolBar(); this.msg('配合已撤回：' + v.msg, true); return; }
+    this.lastSnap = S.snap; this.commit(); this.rebuild(); this.showToolBar(); this.msg('✓ 配合完成');
+  };
   P.mateCancel = function () { const S = this.mateS; if (!S) return; this.mateS = null; this.M = JSON.parse(S.snap); this.rebuild(); this.showToolBar(); this.msg('已取消配合'); };
   /** one-shot API: mate(refA, refB, {type, offset(m), angle(deg), flip}) -> joint */
-  P.mate = function (r1, r2, o = {}) { this.mateStart(r1, r2, o); const j = this.M.joints[this.M.joints.length - 1]; this.mateCommit(); return this.M.joints.find(x => x.id === (j && j.id)) || null; };
+  P.mate = function (r1, r2, o = {}) { this.mateStart(r1, r2, o); const jid = this.mateS && this.mateS.j; this.mateCommit(); return (jid && this.M.joints.find(x => x.id === jid)) || null; };
   /** move the free side so A's point/normal is flush (normals opposed) with B's, then add the joint */
   P.mateCore = function (r1, r2, o) {
     const A = this.part(r1.pid), B = this.part(r2.pid); if (!A || !B) return null;
     const an = analyze(this.M), cA = an.comps[an.compOf[A.id]], cB = an.comps[an.compOf[B.id]], same = an.compOf[A.id] === an.compOf[B.id];
     let mv = null, from = r1, to = r2;
-    if (!same && !cA.anchored) mv = cA; else if (!same && !cB.anchored) { mv = cB; from = r2; to = r1; }
+    // A moves onto B when it can; a part that is only "fixed" by its flag (e.g. a motor) may still be moved; never join two separated parts in place
+    const pm = same ? null : this.pickMover(A, B);
+    if (pm) { mv = pm.comp; if (pm.side === 'b') { from = r2; to = r1; } }
     const F = this.part(from.pid), T = this.part(to.pid);
     const nT = axW(T, to.n), pT = ptW(T, to.p);
+    if (!mv) { const d = ptW(F, from.p).distanceTo(pT); if (d > 0.001) { this.mateErr = `无法配合：${A.name} 与 ${B.name} ${same ? '已在同一装配体中' : '都已连接到大地'}，且相距 ${(d * 1000).toFixed(1)} mm——不会在分开的零件之间建立连接。请先拆开或移动其中一个（拖动 / 方向键），再配合`; this.msg(this.mateErr, true); return null; } }
+    this.mateErr = null;
     if (mv) {
       const nF = axW(F, from.n), pF = ptW(F, from.p), want = o.flip ? nT.clone() : nT.clone().negate();
       const R = new THREE.Quaternion().setFromUnitVectors(nF, want); R.premultiply(new THREE.Quaternion().setFromAxisAngle(nT, (o.angle || 0) * D2R));
       const tgt = pT.clone().addScaledVector(nT, o.offset || 0);
-      for (const Pp of mv.parts) { Pp.p = V3(Pp.p).sub(pF).applyQuaternion(R).add(tgt).toArray(); Pp.q = R.clone().multiply(Q4(Pp.q)).toArray(); if (Pp.type !== 'mesh' || !Pp.fixed) { } }
-    } else if (!same) this.msg('两个零件都已固定/锚定：不移动，直接在 B 的点处建立连接', true);
+      const st = this.posesOf(), mids = mv.parts.map(Pp => Pp.id);
+      for (const Pp of mv.parts) { Pp.p = V3(Pp.p).sub(pF).applyQuaternion(R).add(tgt).toArray(); Pp.q = R.clone().multiply(Q4(Pp.q)).toArray(); }
+      this.fixWorldAnchors(st, mids);
+    }
     const type = o.type || 'fixed', axis = o.axis && o.axis !== 'n' ? new THREE.Vector3(o.axis === 'X' ? 1 : 0, o.axis === 'Y' ? 1 : 0, o.axis === 'Z' ? 1 : 0) : nT;
     const anchor = pT.clone().addScaledVector(nT, (o.offset || 0) / 2);
     const extra = Object.assign({}, o.joint || {});
@@ -309,6 +323,15 @@ export function installExtra(App) {
       <button class="small run" id="mMir">⇋ 镜像复制</button> <button class="del" id="mDel">删除全部</button>
       <div class="hint2">例：装好一侧车轮组件（轮 + 转向块 + 连接），组合后“镜像复制”到另一侧；镜像平面默认取所连接零件（如车架）的中心。</div>`;
     el.appendChild(d);
+    // move / rotate the whole selection (its connected assemblies move along, joints and ground anchors stay valid)
+    const mv = document.createElement('div'); mv.className = 'mpanel mmove'; const mids = this.moveSet(this.sel.p, { multi: true }), c = this.selCenter(mids);
+    mv.innerHTML = `<h3>移动 / 旋转（${mids.length} 个零件一起）</h3>
+      <div class="row"><label>中心位置</label>${[0, 1, 2].map(i => `<input type="number" step="5" class="mPos" data-i="${i}" value="${((Math.round(c.getComponent(i) * 10000) / 10) || 0).toFixed(1)}" title="${'XYZ'[i]}">`).join('')}<span class="u">mm</span></div>
+      <div class="row"><label>旋转</label><select id="mRotAx" style="flex:none;width:52px"><option value="Y">Y</option><option value="X">X</option><option value="Z">Z</option></select><input id="mRot" type="number" step="15" value="0" title="输入角度回车：绕选中中心旋转（相对）"><span class="u">°</span></div>
+      <div class="hint2">左键拖动任一零件=移动整个装配体（Shift 竖直，Alt 只移动该零件，Ctrl 按连接约束拖动）· 方向键 5 mm / Shift 50 mm · PageUp/PageDown 上下 · G 坐标轴 · R 旋转 15°</div>`;
+    d.before(mv);
+    mv.querySelectorAll('.mPos').forEach(inp => { inp.onchange = () => { if (inp.value !== '' && isFinite(+inp.value)) this.setSelCenter(+inp.dataset.i, +inp.value / 1000); }; inp.onkeydown = e => e.stopPropagation(); });
+    const ri = mv.querySelector('#mRot'); ri.onchange = () => { const v = +ri.value; if (v && isFinite(v)) this.rotateSelBy(mv.querySelector('#mRotAx').value, v); }; ri.onkeydown = e => e.stopPropagation();
     const ax = d.querySelector('#mAx'), atI = d.querySelector('#mAt'), setAt = () => { atI.value = (this.mirrorDefault(ids, +ax.value) * 1000).toFixed(1); }; setAt(); ax.onchange = setAt;
     if (grouped) d.querySelector('#mUngrp').onclick = () => this.ungroupSel(ids); else d.querySelector('#mGrp').onclick = () => this.groupSel(ids);
     d.querySelector('#mDup').onclick = () => this.cloneSet(ids, 'copy');

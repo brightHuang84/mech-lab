@@ -98,7 +98,7 @@ function moveParts(parts, R, pivot, L, M) {
   // ground joints (b = null) store their world anchor in lb: carry it along so the moved assembly stays consistent
   if (M) { const ids = new Set(parts.map(P => P.id)); for (const j of M.joints) if (j.b == null && ids.has(j.a) && Array.isArray(j.lb)) j.lb = V3(j.lb).sub(pivot).applyQuaternion(R).add(L).toArray(); }
 }
-function ensureRot(app, P, axis, center) { if (!hasJoint(app.M, P.id, ['revolute'])) app.addJoint('revolute', P, null, center.clone(), axis.clone()); }
+function ensureRot(app, P, axis, center) { if (!hasJoint(app.M, P.id, ['revolute'])) app.addJoint('revolute', P, null, center.clone(), axis.clone(), { auto: true }); }
 const dummyCtx = { toScreen: v => new THREE.Vector2(v.x, v.y), cursor: null };
 function ghostify(o) { if (!o) return; o.traverse(m => { if (m.isMesh && m.material) { m.material = m.material.clone(); m.material.transparent = true; m.material.opacity = 0.55; m.castShadow = false; } }); }
 
@@ -159,7 +159,7 @@ export function installAsm(App) {
     const gj = c => this.M.joints.some(j => j.b == null && !isForce(j) && c.parts.some(p => p.id === j.a));
     const lone = c => c.parts.length === 1 && !this.M.joints.some(j => j.a === c.parts[0].id || j.b === c.parts[0].id);
     let mv = null;
-    if (same) info.note = '两零件已在同一装配体中：不移动，直接建立连接';
+    if (same) info.note = '两零件已在同一装配体中：不移动，直接建立连接（必须已经对齐）';
     else if (!cB.anchored || (lone(cB) && !gj(cB))) mv = 'b';
     else if (!cA.anchored) mv = 'a';
     else if (!gj(cB)) mv = 'b';
@@ -168,7 +168,7 @@ export function installAsm(App) {
     if (mv === 'a') info.note = B.name + ' 所在装配体已固定，改为移动 ' + A.name;
     const F = mv === 'a' ? A : B, T = mv === 'a' ? B : A, comp = mv ? (mv === 'a' ? cA : cB) : null;
     const eA = asmEntries(A).find(e => e.key === pr.ka), eB = asmEntries(B).find(e => e.key === pr.kb);
-    const nj = this.M.joints.length, nc = this.M.couplings.length, t = pr.type;
+    const nj = this.M.joints.length, nc = this.M.couplings.length, t = pr.type, nid0 = this.M.nid;
     if (t === 'gear') {
       const G = F, H = T, hq = Q4(H.q), hp = V3(H.p), nH = new THREE.Vector3(0, 0, 1).applyQuaternion(hq);
       let p0 = V3(G.p); if (pr.ang) p0 = p0.sub(hp).applyAxisAngle(nH, pr.ang * D2R).add(hp);
@@ -205,10 +205,15 @@ export function installAsm(App) {
         if (!hasJoint(this.M, S.id, ['revolute'])) this.addJoint('revolute', S, null, V3(S.p), sAx);
         if (!hasJoint(this.M, N.id, ['prismatic'])) this.addJoint('prismatic', N, null, anchor, sAx);
         if (!this.addCoupling('screw', S, N)) info.err = '无法建立螺旋副';
-      } else this.addJoint(t, A, B, anchor, jax, t === 'helical' ? { lead: 0.005 } : {});
+      } else { this._dupJoint = null; this.addJoint(t, A, B, anchor, jax, t === 'helical' ? { lead: 0.005 } : {}); if (this._dupJoint) { info.dup = true; info.note = '已有相同的连接，未重复添加'; this._dupJoint = null; } }
       info.label = ATYPE[t];
       const wa = eWorld(A, eA, clampPrm(eA, pr.pa)), wb = eWorld(B, eB, clampPrm(eB, pr.pb)); const d = wb.p.clone().sub(wa.p);
       info.gap = d.length(); info.radial = d.clone().addScaledVector(X.axis, -d.dot(X.axis)).length();
+      // never join visually separated parts: if nothing could be moved, the two points must already coincide (stack / offset allowed)
+      if (!mv && info.gap > 0.001 + (X.stand || 0) + Math.abs(pr.off || 0)) {
+        this.M.joints.splice(nj); this.M.couplings.splice(nc); this.M.nid = nid0;
+        info.err = `${A.name} 与 ${B.name} 相距 ${(info.gap * 1000).toFixed(1)} mm，且${same ? '已在同一装配体中' : '都已连接到大地'}无法移动对齐：未建立连接（请先拆开或移动其中一个）`;
+      }
     }
     info.jids = this.M.joints.slice(nj).map(j => j.id); info.cids = this.M.couplings.slice(nc).map(c => c.id);
     if (mv) { info.moved = comp.parts.map(p => p.id); info.mover = F.id; this.liftComp(F.id); }
@@ -255,15 +260,18 @@ export function installAsm(App) {
   P.asmCommit = function () {
     const S = this.asm; if (!S) return null;
     this.asmPreview(false);
-    const info = S.info, changed = this.snapshot() !== S.snap;
+    const info = S.info; let changed = this.snapshot() !== S.snap;
     this.asm = null; this.asmClear();
-    if (changed) { this.lastSnap = S.snap; this.commit(); this.relaxAll(); }
+    if (changed) { // validate: new joints sit on both parts and the edit gap closes (< 0.5 mm), else revert
+      const v = this.validateNew(info.flatMap(i => i.jids), Math.max(0, ...info.map(i => i.stand || 0), ...S.pairs.map(pr => Math.abs(pr.off || 0))));
+      if (!v.ok) { this.M = JSON.parse(S.snap); this.lastSnap = S.snap; this.rebuild(); this.msg('装配已撤回：' + v.msg + '。请检查连接点 / 连接类型后重试', true); return { joints: [], couplings: [], errs: [v.msg], changed: false, reverted: true }; }
+      this.lastSnap = S.snap; this.commit(); }
     this.rebuild();
     const last = S.pairs[S.pairs.length - 1], jids = info.flatMap(i => i.jids), cids = info.flatMap(i => i.cids), errs = info.filter(i => i.err).map(i => i.err);
     this.select({ p: last.b });
     if (changed) { const ids = [...new Set(S.pairs.flatMap(pr => [pr.a, pr.b]))], j0 = jids.length ? this.M.joints.find(j => j.id === jids[jids.length - 1]) : null;
       this.flash = { ids, jids, t0: performance.now(), marker: j0 ? V3(j0.la).applyQuaternion(Q4(this.part(j0.a).q)).add(V3(this.part(j0.a).p)) : V3(this.part(last.b).p), label: '✓ 已装配' }; }
-    this.msg(changed ? `✓ 装配完成：新建 ${jids.length} 个连接、${cids.length} 个传动（可 Ctrl+Z 一步撤销）` + (errs.length ? '；问题：' + errs.join('；') : '') : '没有需要新建的连接', !!errs.length);
+    this.msg(changed ? `✓ 装配完成：新建 ${jids.length} 个连接、${cids.length} 个传动（可 Ctrl+Z 一步撤销）` + (errs.length ? '；问题：' + errs.join('；') : '') : (errs.length ? '未装配：' + errs.join('；') : '没有需要新建的连接'), !!errs.length);
     return { joints: jids, couplings: cids, errs, changed };
   };
   P.asmCancel = function (silent) {

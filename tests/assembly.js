@@ -14,7 +14,8 @@ module.exports = async function (p, check, OUT) {
     await p.mouse.up(); await frame();
     return p.evaluate(() => app.M.parts[app.M.parts.length - 1].id);
   };
-  const mdrag = async (from, to, steps = 12) => { await p.mouse.move(from[0], from[1]); await p.mouse.down(); await p.mouse.move(to[0], to[1], { steps }); await frame(); await p.mouse.up(); await frame(); };
+  // mods: e.g. ['Control'] = Ctrl+drag (articulate along joints; plain left-drag moves the whole assembly)
+  const mdrag = async (from, to, steps = 12, mods = []) => { for (const m of mods) await p.keyboard.down(m); await p.mouse.move(from[0], from[1]); await p.mouse.down(); await p.mouse.move(to[0], to[1], { steps }); await frame(); await p.mouse.up(); for (const m of mods) await p.keyboard.up(m); await frame(); };
   const conn = (id, name) => p.evaluate((id, name) => { const P = app.part(id); return app._conn(P, name); }, id, name);
   await p.evaluate(() => { app._conn = (P, name) => { const c = app._connectors(P).find(c => c.n === name); const v = new app._V(...c.p).applyQuaternion(new app.cam.quaternion.constructor(...P.q)).add(new app._V(...P.p)); return v.toArray(); }; });
 
@@ -50,14 +51,14 @@ module.exports = async function (p, check, OUT) {
   const endB = await conn(rod, '端孔B'), pinW = await conn(base, '轴销(前)');
   const sB = await scr(endB);
   const dbg0 = await p.evaluate(xy => { const e = { clientX: xy[0], clientY: xy[1] }; const h = app.pickAt(e); return { h: h.pid, axis: app.tc.axis, sel: app.sel }; }, sB);
-  await mdrag(sB, [sB[0] - 60, sB[1] + 110]);
+  await mdrag(sB, [sB[0] - 60, sB[1] + 110], 12, ['Control']);
   const rot = await p.evaluate((rod, base) => { const R = app.part(rod), h = app._conn(R, '端孔A'), pw = app._conn(app.part(base), '轴销(前)'), e = app._conn(R, '端孔B'); return { ang: Math.atan2(e[1] - h[1], e[0] - h[0]) * 180 / Math.PI, gap: app.editGap() * 1000, pivErr: Math.hypot(h[0] - pw[0], h[1] - pw[1]) * 1000, msg: document.getElementById('stMsg').textContent, joints: app.M.joints.length }; }, rod, base);
   check('装配后立即可拖动：连杆绕铰链转动', rot.ang < -20 && rot.gap < 1 && rot.pivErr < 0.5 && rot.joints === 1, JSON.stringify(rot) + JSON.stringify(dbg0));
   void pinW;
   // strong pull detaches
   const e2 = await conn(rod, '端孔B'), h2 = await conn(rod, '端孔A'); const s2 = await scr(e2), sh = await scr(h2);
   const dir = [s2[0] - sh[0], s2[1] - sh[1]], dl = Math.hypot(...dir);
-  await mdrag(s2, [s2[0] + dir[0] / dl * 300, s2[1] + dir[1] / dl * 300], 20);
+  await mdrag(s2, [s2[0] + dir[0] / dl * 300, s2[1] + dir[1] / dl * 300], 20, ['Control']);
   const det = await p.evaluate(() => ({ joints: app.M.joints.length, parts: app.M.parts.length, msg: document.getElementById('stMsg').textContent }));
   check('用力拉开 → 拆开连接', det.joints === 0 && det.parts === 2, JSON.stringify(det));
   const del = await p.evaluate((rod) => { app.undo(); const j0 = app.M.joints.length; app.select({ p: rod }); app.deleteSel(); return { before: j0, after: app.M.joints.length, parts: app.M.parts.length }; }, rod);
@@ -107,7 +108,7 @@ module.exports = async function (p, check, OUT) {
   const top = await conn(wall, '顶面');
   const blk = await dropAt('block', await scr([top[0] + 0.05, top[1], top[2]]));
   const sl0 = await p.evaluate((wall, blk) => { const B = app.part(blk); return { pri: app.M.joints.some(j => j.type === 'prismatic' && [j.a, j.b].includes(wall) && [j.a, j.b].includes(blk)), p: B.p.slice(), bottom: B.p[1] - B.d.h / 2, wallTop: app.part(wall).p[1] + app.part(wall).d.h / 2 }; }, wall, blk);
-  const sb = await scr(sl0.p); await mdrag(sb, [sb[0] + 120, sb[1] - 40]);
+  const sb = await scr(sl0.p); await mdrag(sb, [sb[0] + 120, sb[1] - 40], 12, ['Control']);
   const sl1 = await p.evaluate(blk => app.part(blk).p.slice(), blk);
   const sl = { pri: sl0.pri, seat_mm: (sl0.bottom - sl0.wallTop) * 1000, dx_mm: (sl1[0] - sl0.p[0]) * 1000, dy_mm: (sl1[1] - sl0.p[1]) * 1000, dz_mm: (sl1[2] - sl0.p[2]) * 1000 };
   check('直接装配：滑块→导轨(滑动副)，拖动时沿导轨滑动', sl.pri && Math.abs(sl.seat_mm) < 0.01 && sl.dx_mm > 20 && Math.abs(sl.dy_mm) < 1 && Math.abs(sl.dz_mm) < 1, JSON.stringify(sl));
