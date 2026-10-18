@@ -19,7 +19,10 @@ export function installExtra(App) {
   const P = App.prototype;
 
   P.initExtra = function () {
-    this.GEO = GEO; this.gizmoOn = false; this.keys = new Set(); this.mateType = 'fixed'; this.conRole = 'hole';
+    this.GEO = GEO; this.gizmoOn = false; this._gizmoFor = null;
+    // older builds never persisted the gizmo, but drop any stale gizmo/transform keys so nothing can switch it on at startup
+    try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && /gizmo|tmode|transform/i.test(k)) localStorage.removeItem(k); } } catch (e) { /* no storage */ }
+    this.keys = new Set(); this.mateType = 'fixed'; this.conRole = 'hole';
     // top-bar buttons
     const after = $('btnRot'), mk = (id, txt, title, cls = 'tb') => { const b = document.createElement('button'); b.className = cls; b.id = id; b.textContent = txt; b.title = title; return b; };
     const bG = mk('btnGizmo', '⊕ 坐标轴', '显示/隐藏移动坐标轴 (G)；选中零件时默认不显示，直接左键拖动零件即可移动');
@@ -28,7 +31,9 @@ export function installExtra(App) {
     const bM = mk('btnMate', '🧲 配合', '两点配合 (M)：先点零件A上的面/连接点，再点零件B上的面/连接点 → A 贴合到 B，再选连接类型/偏移/角度');
     const bC = mk('btnAddCon', '＋连接点', '在零件表面点击添加自定义连接点（孔/轴/安装面），用于导入零件的装配');
     const bI = mk('btnImport', '📥 导入零件', '导入 3D 模型：STL / OBJ / GLB / GLTF（也可直接把文件拖到场景中）');
-    sep.after(bM); bM.after(bC); bC.after(bI);
+    const bA = mk('btnAsm', '🔧 装配', '装配面板 (J)：先 Ctrl/Shift+点击 选中两个或多个零件，再选连接点和连接类型（固定/铰链/滑动/球铰/齿轮啮合/皮带/链条/螺旋），确定装配', 'tb asmBtn');
+    sep.after(bA); bA.after(bM); bM.after(bC); bC.after(bI);
+    bA.onclick = () => this.asmToggle();
     const fi = document.createElement('input'); fi.type = 'file'; fi.id = 'impIn'; fi.accept = '.stl,.obj,.glb,.gltf'; fi.style.display = 'none'; bI.after(fi);
     bG.onclick = () => this.toggleGizmo(); bM.onclick = () => this.setTool(this.tool === 'mate' ? 'select' : 'mate'); bC.onclick = () => this.setTool(this.tool === 'addcon' ? 'select' : 'addcon');
     bI.onclick = () => fi.click(); fi.onchange = e => { const f = e.target.files[0]; if (f) this.importFileObj(f); e.target.value = ''; };
@@ -51,11 +56,14 @@ export function installExtra(App) {
 
   // ---------------- gizmo on demand ----------------
   P.toggleGizmo = function (mode) {
+    if (this.asm) { this.msg('装配面板打开时不显示坐标轴（先确定或取消装配）', true); return; }
+    if (!this.gizmoOn && !(this.sel && this.sel.p && this.part(this.sel.p))) { this.msg('先单击选中一个零件，再按 G 显示坐标轴（选中零件本身不会显示坐标轴）'); return; }
     if (!mode) this.gizmoOn = !this.gizmoOn;
     else if (this.gizmoOn && this.tc.mode === mode) this.gizmoOn = false;
     else { this.tc.setMode(mode); this.gizmoOn = true; }
+    this._gizmoFor = this.gizmoOn ? this.sel.p : null;
     this.updGizmoBtns(); this.updSel();
-    this.msg(this.gizmoOn ? '已显示' + (this.tc.mode === 'rotate' ? '旋转' : '移动') + '坐标轴（G 隐藏；W 移动 / E 旋转）' : '已隐藏坐标轴：直接左键拖动零件移动，R 旋转 15°（G 显示坐标轴）');
+    this.msg(this.gizmoOn ? '已显示' + (this.tc.mode === 'rotate' ? '旋转' : '移动') + '坐标轴（G 隐藏；W 移动 / E 旋转；选别的零件后自动隐藏）' : '已隐藏坐标轴：直接左键拖动零件移动，R 旋转 15°（G 显示坐标轴）');
   };
   P.updGizmoBtns = function () { const on = this.gizmoOn, m = this.tc.mode; $('btnGizmo').classList.toggle('on', on); $('btnMove').classList.toggle('on', on && m === 'translate'); $('btnRot').classList.toggle('on', on && m === 'rotate'); };
 
@@ -317,5 +325,5 @@ export function installExtra(App) {
 
   // ---------------- save / load helpers ----------------
   P.usedGeos = function (M) { const o = {}; for (const Pp of M.parts) if (Pp.type === 'mesh' && GEO[Pp.d.g]) o[Pp.d.g] = GEO[Pp.d.g]; return o; };
-  P.saveData = function () { const model = this.mode === 'edit' ? this.M : JSON.parse(this.init); return { app: 'mech-sandbox-3d', version: 2, model, geos: this.usedGeos(model), camera: { p: this.cam.position.toArray(), t: this.orbit.target.toArray() } }; };
+  P.saveData = function () { const model = this.asm ? JSON.parse(this.asm.snap) : this.mode === 'edit' ? this.M : JSON.parse(this.init); return { app: 'mech-sandbox-3d', version: 2, model, geos: this.usedGeos(model), camera: { p: this.cam.position.toArray(), t: this.orbit.target.toArray() } }; };
 }

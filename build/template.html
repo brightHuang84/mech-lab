@@ -113,6 +113,22 @@ button.small.run{background:#16a34a;color:#fff;border-color:#15803d}
 #impDlg .title{font-weight:700;font-size:14px;margin-bottom:6px;word-break:break-all}
 .item.mine{position:relative}.item .mdel{position:absolute;right:2px;top:0;color:#9ca3af;font-size:10px;cursor:pointer}.item .mdel:hover{color:#dc2626}
 .mpanel .row{display:flex;align-items:center;gap:6px;margin:4px 0}
+#side.asm{width:350px}
+#asmPanel{display:none;background:#eff6ff;border:2px solid #2563eb;border-radius:8px;padding:7px 8px;margin-bottom:8px;box-shadow:0 2px 8px rgba(37,99,235,.18)}
+#asmPanel .asmHead{font-weight:700;font-size:15px;color:#1e3a8a;display:flex;align-items:center;gap:6px;margin-bottom:4px}#asmPanel .asmHead small{color:#64748b;font-weight:400;font-size:12px}
+#asmX{margin-left:auto;cursor:pointer;color:#64748b;padding:0 4px}#asmX:hover{color:#dc2626}
+#asmPanel .apair{background:#fff;border:1px solid #bfdbfe;border-radius:6px;padding:5px 6px;margin:5px 0;cursor:pointer}#asmPanel .apair.act{cursor:default;border-color:#2563eb}
+#asmPanel .aph{font-weight:600;display:flex;align-items:center;gap:3px;flex-wrap:wrap}.apt{margin-left:auto;background:#dbeafe;color:#1e40af;border-radius:4px;padding:0 5px;font-size:11px;font-weight:600}
+.tagA,.tagB{display:inline-block;color:#fff;border-radius:3px;padding:0 4px;font-size:11px;font-weight:700;margin-right:2px}.tagA{background:#f97316}.tagB{background:#2563eb}.arr{color:#64748b}
+#asmPanel .asmPt{margin:5px 0;border-top:1px dashed #dbeafe;padding-top:4px}#asmPanel .asmPtH{font-size:12px;color:#334155;margin-bottom:2px}
+#asmPanel select.asmList{width:100%;font-size:12px;border:1px solid #cbd5e1;border-radius:4px;background:#fff}#asmPanel select.asmList:disabled{opacity:.45}
+#asmPanel .row label{width:70px}#asmPanel .row label.inl{width:auto;display:flex;align-items:center;gap:2px}
+#asmPanel .asmInfo{font-size:11px;color:#475569;margin:4px 0;line-height:1.5}.asmErr{color:#b91c1c;font-weight:600}
+#asmPanel .asmEx{margin-top:6px;border-top:1px solid #bfdbfe;padding-top:4px}#asmPanel .asmExH{font-size:12px;color:#334155;font-weight:600}
+#asmPanel .asmExR{display:flex;align-items:center;gap:4px;font-size:12px;margin:3px 0}#asmPanel .asmExR span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#asmPanel .asmExR .small{margin:0;padding:1px 6px}
+#asmPanel .asmBtns{display:flex;gap:6px;margin-top:6px}#asmPanel .asmBtns button{flex:1;font-size:14px;padding:6px 4px;font-weight:600}
+.asmLbl{position:absolute;pointer-events:none;display:none;color:#fff;padding:2px 7px;border-radius:4px;font-size:12px;font-weight:600;white-space:nowrap;z-index:15}.asmLbl.a{background:#ea580c}.asmLbl.b{background:#2563eb}
+.tb.asmBtn{background:#1d4ed8;border-color:#3b82f6;font-weight:600}.tb.asmBtn.on{background:#16a34a;border-color:#15803d}
 </style></head>
 <body><div id="app">
 <div id="topbar">
@@ -144,15 +160,15 @@ button.small.run{background:#16a34a;color:#fff;border-color:#15803d}
 <h3 id="recentHdr">最近使用</h3><div class="pal" id="palRecent"></div>
 <h3 id="basicHdr">零件库（拖到场景）</h3><div class="pal" id="palItems"></div>
 <h3 id="transHdr">传动零件</h3><div class="pal" id="palTrans"></div><div class="hint2" id="palNone" style="display:none">没有匹配的零件</div>
-<details id="advTools"><summary>高级：手动连接工具</summary><div class="hint2">一般无需使用：直接把零件拖到连接点即可自动装配。</div><div class="tools" id="palTools"></div></details>
-<div class="legend"><span><span class="key">Space</span>运行/暂停</span><span><span class="key">Del</span>删除</span><span><span class="key">Esc</span>取消</span><span><span class="key">G</span>坐标轴</span><span><span class="key">M</span>配合</span><span><span class="key">Ctrl+G</span>组合</span><span><span class="key">Ctrl+Z/Y</span>撤销重做</span><span><span class="key">Ctrl+D</span>复制</span><span><span class="key">R</span>旋转15°</span><span><span class="key">F</span>聚焦/适应</span><span><span class="key">中键</span>旋转视角</span><span><span class="key">右键拖</span>平移</span></div>
+<details id="advTools"><summary>高级：手动连接工具</summary><div class="hint2">一般无需使用：Ctrl/Shift+点击选中两个零件，用右侧“装配”面板连接即可。</div><div class="tools" id="palTools"></div></details>
+<div class="legend"><span><span class="key">Space</span>运行/暂停</span><span><span class="key">Del</span>删除</span><span><span class="key">Esc</span>取消</span><span><span class="key">G</span>坐标轴</span><span><span class="key">J</span>装配面板</span><span><span class="key">M</span>配合</span><span><span class="key">Ctrl+G</span>组合</span><span><span class="key">Ctrl+Z/Y</span>撤销重做</span><span><span class="key">Ctrl+D</span>复制</span><span><span class="key">R</span>旋转15°</span><span><span class="key">F</span>聚焦/适应</span><span><span class="key">中键</span>旋转视角</span><span><span class="key">右键拖</span>平移</span></div>
 </div>
 <div id="outliner"><div id="olHead"><span id="olToggle" title="折叠/展开">▾</span>组件<span id="olCount">0</span><span style="margin-left:auto;font-weight:400;color:#94a3b8;font-size:11px">Ctrl/Shift 多选</span></div>
 <div id="olBody"><input id="olSearch" type="search" placeholder="🔍 筛选组件"><div id="olList"></div></div></div></div>
-<div id="center"><canvas id="cv"></canvas><div id="tipbar">💡 左键拖动零件到连接点/面上即自动装配（Alt 自由放置，Tab 换连接类型）· <b>中键=旋转视角</b> · 右键=平移 · G 坐标轴 · M 配合 · 📥 可拖入 STL/OBJ/GLB<span id="tipClose" title="关闭">✕</span></div><div id="snapRing"></div><div id="ctx"></div><div id="snapLbl"></div><div id="energy"></div><div id="warn"></div>
+<div id="center"><canvas id="cv"></canvas><div id="tipbar">💡 <b>装配：Ctrl/Shift+点击选两个零件 → 右侧“🔧 装配”面板选连接点和类型 → 确定</b>（J）· <b>中键=旋转视角</b> · 右键=平移 · G 坐标轴 · 📥 可拖入 STL/OBJ/GLB<span id="tipClose" title="关闭">✕</span></div><div id="snapRing"></div><div id="ctx"></div><div id="snapLbl"></div><div id="energy"></div><div id="warn"></div>
 <div id="views"><button data-view="front">前视</button><button data-view="top">俯视</button><button data-view="side">侧视</button><button data-view="iso">轴测</button></div>
-<div id="hint">中键拖动=旋转视角 · 右键拖动=平移 · 滚轮=缩放 · 左键=选择/拖动零件 · R：旋转 · G：坐标轴 · M：配合 · 运行时按绑定键控制关节</div></div>
-<div id="side"><h3>属性</h3><div id="props"></div><div id="readout"></div><canvas id="plot" width="540" height="300"></canvas></div>
+<div id="hint">中键拖动=旋转视角 · 右键拖动=平移 · 滚轮=缩放 · 左键=选择/拖动零件 · Ctrl/Shift+点击 多选 → J 装配 · R：旋转 · G：坐标轴 · M：配合 · 运行时按绑定键控制关节</div></div>
+<div id="side"><div id="asmPanel"></div><h3>属性</h3><div id="props"></div><div id="readout"></div><canvas id="plot" width="540" height="300"></canvas></div>
 </div>
 <div id="status"><span id="stMsg">加载中…</span><span id="stInfo"></span></div>
 </div><div id="ghost" style="background:#2563eb;color:#fff;padding:3px 8px;border-radius:4px"></div>

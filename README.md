@@ -10,11 +10,12 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - `build/src/resize.js` – resizing a part while keeping every connection matched (anchor remapping, anchored-side settling, gear-mesh repositioning, relaxation, feasibility check)
 - `build/src/presets.js` – 15 presets (incl. 三轮车 and 四轮小车(通用零件装配)), all built from the same free parts
 - `build/src/importer.js` – STL (binary/ASCII) / OBJ / GLB / GLTF (embedded) import: parsing, welding, decimation, volume, convex hull
+- `build/src/asmpanel.js` – 装配面板：连接点列表（中文名）、智能默认配对、对位计算、实时预览、确定/交换/取消、链式/全部到第一个、已有连接编辑
 - `build/src/extra.js` – 坐标轴开关、导入、我的零件、自定义连接点、配合工具、组合/复制/镜像、运行时按键
 - `build/src/examples.js` – 四轮小车示例：只用通用零件、通过与用户相同的 API（mate / 组合 / 镜像 / 关节驱动）搭建
 - `build/src/app.js` – UI, scene, gizmo, tools, run/pause/reset/initial state, undo/redo, IO
 - `build/template.html`, `build/build.sh` – to rebuild: `cd build && npm ci && ./build.sh`
-- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 164 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search); `tests/resize.js` (尺寸修改后连接保持贴合); `tests/features.js` (坐标轴开关、STL/OBJ/GLB 导入与存读、沿杆任意位置吸附、面贴合、配合、关节限位/弹簧编辑、组合镜像、四轮车行驶验证); 测试模型在 `tests/fixtures/`
+- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 183 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search); `tests/resize.js` (尺寸修改后连接保持贴合); `tests/features.js` (坐标轴开关、STL/OBJ/GLB 导入与存读、沿杆任意位置吸附、面贴合、配合、关节限位/弹簧编辑、组合镜像、四轮车行驶验证); `tests/asmpanel.js`（各种选中途径都不出现坐标轴、装配面板默认配对/对位/撤销/链式/预览取消，并生成两张截图）；测试模型在 `tests/fixtures/`
 
 ## 鼠标与键盘操作
 | 操作 | 作用 |
@@ -27,10 +28,11 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 | 滚轮（未拖动零件） | 缩放 |
 | 拖动零件时滚轮 | 旋转零件 15°/格；Shift/Ctrl+滚轮切换旋转轴（视角→X→Y→Z）|
 | R / Shift+R | 选中零件旋转 +15° / −15° |
-| G / Shift+G | 显示/隐藏坐标轴：移动 / 旋转（默认不显示；选中零件不再自动出现坐标轴）|
+| G / Shift+G | 显示/隐藏坐标轴：移动 / 旋转（只有按 G / Shift+G 或工具栏“坐标轴”才显示；改变选择后自动隐藏）|
+| J | 打开/关闭装配面板（需选中 2 个及以上零件）；面板内 Enter 确定装配，Esc 取消 |
 | W / E | 坐标轴显示时切换移动 / 旋转 |
 | M | 配合工具（两次点击：先点要移动零件的面，再点目标零件的面）；Enter 确定，Esc 取消 |
-| Ctrl+单击 / Shift+单击 | 多选零件（多选后可组合、复制、镜像、一起拖动）|
+| Ctrl+单击 / Shift+单击 | 多选零件；选中 2 个及以上零件时右侧自动出现“装配”面板（也可组合、复制、镜像）|
 | Ctrl+G / Ctrl+Shift+G | 组合 / 取消组合（单击组内任一零件即选中整组）|
 | 运行时自定义按键 | 在关节编辑器中绑定（如 W/S 驱动后轮、A/D 转向），按住生效 |
 | F | 有选中零件时聚焦到该零件，否则适应视图 |
@@ -48,7 +50,28 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
   - 在 3D 中选中零件时，对应行高亮并自动滚动到可见；添加、删除、撤销/重做、读取、载入示例后自动同步
 - 新零件自动命名为“类型 序号”（如 轮 1、电机 2）。
 
-## 直接装配（自动连接）
+## 装配面板（推荐的装配方式）
+不需要在 3D 里拖动对位：
+1. 单击第一个零件（A，**固定不动的基准**），再 **Ctrl+单击 / Shift+单击** 第二个零件（B，**要移动的零件**）。画布和左侧组件栏都可以这样多选。
+2. 右侧自动出现 **🔧 装配** 面板（也可以按 **J** 或点工具栏“🔧 装配”打开）。面板已经按零件类型选好默认连接：
+   - 齿轮 + 轴 → 固定在轴身上；轮/带轮 + 轴 → 固定
+   - 连杆端孔 + 连杆端孔 → 铰链（两杆自动错开一层，不重叠）
+   - 两个同模数齿轮 → 齿轮啮合（中心距自动计算）
+   - 轴 + 轴承座 → 铰链（轴穿过轴孔）
+   - 带轮 + 带轮 → 皮带；链轮 + 链轮 → 链条；丝杠 + 螺母 → 螺旋；滑块 + 板 → 滑动；电机 + 齿轮/轮 → 装在输出轴上（铰链，由电机驱动）
+3. 需要时修改：
+   - **连接类型**：固定 / 铰链(转动) / 滑动 / 球铰 / 齿轮啮合（只对能啮合的零件出现）/ 皮带 / 链条 / 螺旋
+   - **A、B 的连接点**：列表里是中文名（如“端孔A（孔）”“轴身（沿轴身·位置可调）”“顶面”，导入零件的自定义连接点也会列出）。轴身、杆身这类连接点可以输入沿轴的位置（mm）。鼠标悬停在列表项上，3D 里会显示该点的标记（A 橙色、B 蓝色、悬停黄色）；也可以直接在 3D 模型上**单击 A 或 B 的位置**来选连接点。
+   - **轴线**（自动 / X / Y / Z）、**反向**、**偏移**（mm）、**旋转角度**（°）
+4. 修改时实时预览：B 半透明显示在装配后的位置。**⇄ 交换 A/B** 可以改为移动另一个零件。
+5. 点 **✓ 确定装配**（Enter）：B 连同与它相连的整个组件一起移到 A 上并建立连接，一次 Ctrl+Z 即可撤销。点 **取消**（Esc）恢复原样。
+
+选中 3 个及以上零件时可以选 **链式**（A–B、B–C、C–D…）或 **全部连到第一个**，每一对都能单独修改。选中零件之间已有的连接会列在面板里，可以直接改类型或删除。
+
+## 选中与坐标轴
+单击零件（画布、组件栏）、从零件库拖入、载入示例、撤销、吸附、配合、组合或装配后，零件**只高亮，不显示坐标轴**。需要精确平移或旋转时按 **G / Shift+G**（或工具栏“坐标轴”）；改变选择后坐标轴自动隐藏。旧版本保存在浏览器里的坐标轴设置会在启动时清除。左键拖动零件仍然可以直接移动它。
+
+## 直接装配（拖动自动连接，可选）
 拖动零件（从零件库拖入，或直接用鼠标拖动场景里的零件）靠近另一零件的连接点时，会显示预览：半透明零件、目标点圆圈和将要建立的连接类型（如“铰链”）。松开后零件精确对位，并自动建立连接（一次撤销即可撤回）。按住 **Alt**，或关闭工具栏上的“自动连接”，可以自由放置。
 
 | 拖动的零件 → 目标 | 自动建立的连接 |
@@ -78,7 +101,7 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 自由（未固定）装配吸附后若有零件穿入地面，整个装配体会自动抬起到地面上。
 
 ## 坐标轴（Gizmo）
-选中零件时**不再自动显示**坐标轴，可直接拖动（自动装配）或用 R 旋转。需要精确平移/旋转时按 **G**（移动）或 **Shift+G**（旋转），再按一次隐藏；工具栏“坐标轴”按钮、右键菜单“显示移动坐标轴 / 显示旋转坐标轴”效果相同。
+选中零件时**不显示**坐标轴，可直接拖动或用 R 旋转。需要精确平移/旋转时按 **G**（移动）或 **Shift+G**（旋转），再按一次隐藏，选别的零件后自动隐藏；工具栏“坐标轴”按钮、右键菜单“显示移动坐标轴 / 显示旋转坐标轴”效果相同。
 
 ## 导入 3D 零件（STL / OBJ / GLB / GLTF）
 - 工具栏 **📥 导入零件**，或直接把文件**拖进 3D 视图**。支持 STL（二进制和 ASCII）、OBJ、GLB、内嵌资源的 GLTF。
@@ -143,6 +166,8 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - 导入：不识别圆柱孔/轴（只有包围盒面和手动添加的连接点）；GLTF 外部 .bin / 贴图不支持（请用 GLB 或内嵌 GLTF），不导入材质颜色；精确网格碰撞体只能固定于大地；导入零件的尺寸只能整体缩放。
 - 同一关节上启用驱动时，驱动代替该关节的弹簧（舵机本身就是弹簧+阻尼）。
 - 没有差速器耦合；两个后轮各自由按键驱动（速度模式下相当于两台电机）。
+- 装配面板：齿轮啮合只认同模数、轴线平行（或锥齿轮/蜗杆等已支持的组合）；皮带/链条把 B 放到与 A 同一平面，按当前方位角和自动中心距摆放；非“丝杠+螺母”的螺旋连接使用固定导程 5 mm；被移动的一侧如果固定于大地或两边都固定于大地，面板只建立连接不移动零件。
+- 装配面板打开时开始拖动零件、运行、撤销、载入示例等操作会先取消面板中的预览。
 - 配合偏移不为 0 时，连接锚点位于两零件之间的空隙中（连接审计会显示间隙）。
 - 镜像的舵机/电机方向按几何镜像，按键语义可能需要在镜像侧“反转”一次。
 - 组合只是选择分组（一起选中/移动/复制/镜像），不是刚性连接；需要刚性请用固定连接。

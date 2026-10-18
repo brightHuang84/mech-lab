@@ -96,6 +96,7 @@ const OUT = '/workspace/mech-sandbox-3d/';
   await require('./resize.js')(p, check, OUT);
   await require('./controls.js')(p, check, OUT);
   await require('./features.js')(p, check, OUT);
+  await require('./asmpanel.js')(p, check, OUT);
   // screenshots
   const shot = async (name, js, t = 0, arg) => { await p.evaluate(js, arg); if (t) await new Promise(r => setTimeout(r, t)); await p.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))); await p.screenshot({ path: OUT + name }); console.log('saved ' + name); };
   await shot('screenshot-edit-gizmo.png', () => { const i = [...document.querySelectorAll('#selPreset option')].findIndex(o => o.textContent === '四连杆') - 1; app.loadPreset(i); app.view('iso'); app.fit(); app.select({ p: app.byName('连杆').id }); }, 300);

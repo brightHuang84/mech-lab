@@ -8,6 +8,7 @@ import { findAssembly, connectors, SNAP_PX, JNAME } from './assemble.js';
 import { resizeModel, maxJointGap } from './resize.js';
 import { installExtra, keyLabel } from './extra.js';
 import { GEO } from './parts.js';
+import { installAsm } from './asmpanel.js';
 
 const $ = id => document.getElementById(id);
 const tv3 = v => new THREE.Vector3(v.x, v.y, v.z), tq4 = q => new THREE.Quaternion(q.x, q.y, q.z, q.w);
@@ -43,7 +44,7 @@ class App {
     this.initThree(); this.initUI(); this.rebuild(); this.init = this.snapshot();
     this.clock = performance.now(); this.acc = 0; this.plotData = [];
     const loop = () => { requestAnimationFrame(loop); this.frame(); }; loop();
-    this.msg('就绪：从左侧拖入零件，靠近连接点会自动装配（按住 Alt 自由放置）；或在“示例”中载入装配');
+    this.msg('就绪：从左侧拖入零件；Ctrl/Shift+点击选中两个零件 → 右侧“装配”面板选连接点和连接类型 → 确定装配（J）；也可在“示例”中载入装配');
   }
   // ---------------- three ----------------
   initThree() {
@@ -95,9 +96,9 @@ class App {
   applySnap() { this.tc.setTranslationSnap(this.snap ? 0.005 : null); this.tc.setRotationSnap(this.snap ? 15 * D2R : null); }
   resize() { const c = $('center'), w = c.clientWidth, h = c.clientHeight; this.renderer.setSize(w, h, false); this.cam.aspect = w / Math.max(1, h); this.cam.updateProjectionMatrix(); }
   ndc(e) { const r = $('cv').getBoundingClientRect(); return new THREE.Vector2((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1); }
-  pickAt(e) {
+  pickAt(e, o = {}) {
     this.scene.updateMatrixWorld(); this.ray.setFromCamera(this.ndc(e), this.cam);
-    if (this.mode === 'edit') for (const h of this.ray.intersectObjects([this.fx], true)) { let o = h.object; while (o && o.userData.jid == null) o = o.parent; if (o) { const j = this.M.joints.find(x => x.id === o.userData.jid); if (j && !isForce(j)) return { jid: j.id, point: h.point }; } }
+    if (this.mode === 'edit' && !o.parts) for (const h of this.ray.intersectObjects([this.fx], true)) { let o = h.object; while (o && o.userData.jid == null) o = o.parent; if (o) { const j = this.M.joints.find(x => x.id === o.userData.jid); if (j && !isForce(j)) return { jid: j.id, point: h.point }; } }
     const hits = this.ray.intersectObjects([this.root, this.fx, this.groundMesh], true);
     for (const h of hits) { let o = h.object; while (o && o.userData.pid == null && o.userData.jid == null && !o.userData.ground) o = o.parent; if (!o) continue; if (o.userData.helper) continue; if (o.userData.pid && (this.part(o.userData.pid) || {}).hidden) continue; let normal = null; if (h.face && o.userData.pid) { normal = h.face.normal.clone().applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(h.object.matrixWorld)).normalize(); if (normal.dot(this.ray.ray.direction) > 0) normal.negate(); } return { pid: o.userData.pid, jid: o.userData.jid, ground: !!o.userData.ground, point: h.point, normal }; }
     return { ground: true, point: this.groundPoint(e) };
@@ -132,9 +133,9 @@ class App {
   }
   snapshot() { return JSON.stringify(this.M); }
   commit() { this.undoS.push(this.lastSnap || this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.redoS = []; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.updButtons(); }
-  beginEdit() { if (this.mode !== 'edit') this.reset(); this.lastSnap = this.snapshot(); }
-  undo() { if (this.mode !== 'edit') this.reset(); if (!this.undoS.length) return; this.redoS.push(this.snapshot()); this.M = JSON.parse(this.undoS.pop()); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已撤销'); }
-  redo() { if (this.mode !== 'edit') this.reset(); if (!this.redoS.length) return; this.undoS.push(this.snapshot()); this.M = JSON.parse(this.redoS.pop()); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已重做'); }
+  beginEdit() { if (this.asm && !this._asmBusy) this.asmCancel(true); if (this.mode !== 'edit') this.reset(); this.lastSnap = this.snapshot(); }
+  undo() { if (this.asm) return this.asmCancel(); if (this.mode !== 'edit') this.reset(); if (!this.undoS.length) return; this.redoS.push(this.snapshot()); this.M = JSON.parse(this.undoS.pop()); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已撤销'); }
+  redo() { if (this.asm) this.asmCancel(true); if (this.mode !== 'edit') this.reset(); if (!this.redoS.length) return; this.undoS.push(this.snapshot()); this.M = JSON.parse(this.redoS.pop()); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已重做'); }
   // ---------------- scene build ----------------
   rebuild(keepProps) {
     this.root.clear(); this.fx.clear(); this.objs = {}; this.jobjs = {}; this.cobjs = {};
@@ -223,6 +224,7 @@ class App {
   }
   // ---------------- interaction ----------------
   hover(e) {
+    if (this.asm && this.mode === 'edit' && !this.dragging()) { const h = this.pickAt(e, { parts: true }), r = h.pid ? this.asmNearest(h) : null; if (r) { this.hl.position.copy(r.w); this.hl.scale.setScalar(0.8); this.hl.visible = true; } else this.hl.visible = false; return; }
     if (this.mode !== 'edit' || this.tool === 'select') { if (!this.pick1) this.hl.visible = false; return; }
     const h = this.pickAt(e);
     if (this.tool === 'mate' || this.tool === 'addcon') { if (h.pid) { const r = this.tool === 'mate' ? this.mateRef(h) : null; this.hl.position.copy(r ? ptW(this.part(h.pid), r.p) : h.point); this.hl.scale.setScalar(0.7); this.hl.visible = true; } else this.hl.visible = false; return; }
@@ -235,10 +237,16 @@ class App {
   }
   click(e) {
     if (this.armed) { const gp = this.groundPoint(e); this.placePart(this.armed, gp); this.armed = null; document.querySelectorAll('.item.armed').forEach(x => x.classList.remove('armed')); return; }
+    const mod = e.ctrlKey || e.metaKey || e.shiftKey;
+    if (this.asm && this.mode === 'edit' && this.tool === 'select' && !mod) {
+      const ha = this.pickAt(e, { parts: true }), pr = this.asm.pairs[this.asm.act];
+      if (ha.pid && pr && (ha.pid === pr.a || ha.pid === pr.b)) { this.asmPickAt(ha); return; }
+      if (!ha.pid) { this.msg('装配面板已打开：点击 A / B 零件可选取连接点；“确定装配”(Enter) 应用，“取消”(Esc) 关闭'); return; }
+    }
     const h = this.pickAt(e);
     if (this.mode !== 'edit' || this.tool === 'select') {
       if (h.jid) this.select({ j: h.jid });
-      else if (h.pid && (e.ctrlKey || e.metaKey || e.shiftKey) && this.mode === 'edit') { const ms = new Set(this.selIds()), g = this.groupOf(h.pid); if (ms.has(h.pid)) { g.forEach(id => ms.delete(id)); this.msel = ms; const nx = [...ms][0]; this.select(nx ? { p: nx } : null, true); } else { g.forEach(id => ms.add(id)); this.msel = ms; this.select({ p: h.pid }, true); } this.msg('已选中 ' + this.msel.size + ' 个零件（Ctrl/Shift+点击 增减；Ctrl+G 组合）'); }
+      else if (h.pid && (e.ctrlKey || e.metaKey || e.shiftKey) && this.mode === 'edit') { const ms = new Set(this.selIds()), g = this.groupOf(h.pid); if (ms.has(h.pid)) { g.forEach(id => ms.delete(id)); this.msel = ms; const nx = [...ms][0]; this.select(nx ? { p: nx } : null, true); } else { g.forEach(id => ms.add(id)); this.msel = ms; this.select({ p: h.pid }, true); } this.msg('已选中 ' + this.msel.size + ' 个零件（Ctrl/Shift+点击 增减；Ctrl+G 组合）'); this.asmAuto(); }
       else if (h.pid) { const g = this.groupOf(h.pid); if (g.length > 1) { this.msel = new Set(g); this.select({ p: h.pid }, true); } else this.select({ p: h.pid }); }
       else this.select(null);
       return;
@@ -369,10 +377,10 @@ class App {
   }
   ptrMove(e) {
     const D = this.pd; if (!D) return;
-    if (!D.started) { if (Math.hypot(e.clientX - D.x, e.clientY - D.y) < 5) return; D.started = true; this.directStart(e); }
+    if (!D.started) { if (Math.hypot(e.clientX - D.x, e.clientY - D.y) < 5) return; D.started = true; if (this.asm) this.asmCancel(true); this.directStart(e); }
     this.directMove(e);
   }
-  ptrUp(e) { const D = this.pd; if (!D) return; this.pd = null; this.orbit.enabled = true; if (D.started) { this.tcDragged = true; this.directEnd(D); } }
+  ptrUp(e) { const D = this.pd; if (!D) return; this.pd = null; this.orbit.enabled = true; if (D.started) this.directEnd(D); } // (the canvas click handler already ran for this pointerup; setting tcDragged here used to swallow the NEXT click)
   directStart(e) {
     const D = this.pd; this.lastSnap = this.snapshot(); const multi = (this.msel && this.msel.size > 1 && this.msel.has(D.pid)) ? [...this.msel] : null; this.select({ p: D.pid }, !!multi); this.tc.detach(); this.snapAlt = 0; this.rotInfo = ''; this.orbit.enableZoom = false;
     const an = analyze(this.M), g = an.groupOf[D.pid], comp = an.comps[an.compOf[D.pid]];
@@ -447,11 +455,13 @@ class App {
     const n = n0 - this.M.joints.length - this.M.couplings.length; this.commit(); this.rebuild(); this.select({ p: pid }); this.msg('已拆开 ' + P.name + '：移除 ' + n + ' 个连接/传动');
   }
   trialRun(sec = 3) { if (this.mode !== 'edit') this.reset(); this.startRun(); this.trialEnd = performance.now() + sec * 1000; this.msg('试运行 ' + sec + ' 秒…（结束后自动回到编辑状态）'); }
-  select(s, keepMulti) { if (!keepMulti) this.msel = new Set(s && s.p ? [s.p] : []); this.sel = s; this.tracePts = []; this.plotData = []; this.updSel(); this.updProps(); }
+  select(s, keepMulti) { if (!keepMulti) this.msel = new Set(s && s.p ? [s.p] : []); this.sel = s; this.tracePts = []; this.plotData = []; this.updSel(); this.updProps(); if (this.asm) this.asmSelChanged(); }
   updSel() {
     const ms = this.msel || new Set();
     for (const id in this.objs) { const on = (this.sel && this.sel.p === id) || ms.has(id), hv = this.hoverPid === id; this.objs[id].traverse(o => { if (o.isMesh && o.material.emissive) { o.material.emissive.setHex(hv ? 0xf59e0b : on ? 0x1d4ed8 : o.userData.baseEm); o.material.emissiveIntensity = hv ? 0.45 : on ? 0.35 : 1; } }); }
     this.olSync();
+    // the gizmo is never a default state: it belongs to the part it was explicitly switched on for (G / Shift+G / button) and turns off when the selection changes
+    if (this.gizmoOn && (!this.sel || !this.sel.p || this.sel.p !== this._gizmoFor || this.asm || this.mode !== 'edit' || (this.msel && this.msel.size > 1))) { this.gizmoOn = false; this._gizmoFor = null; if (this.updGizmoBtns && $('btnGizmo')) this.updGizmoBtns(); }
     if (this.gizmoOn && this.sel && this.sel.p && this.mode === 'edit' && this.tool === 'select' && this.part(this.sel.p) && !this.part(this.sel.p).locked) {
       const P = this.part(this.sel.p); this.proxy.position.copy(V3(P.p)); this.proxy.quaternion.copy(Q4(P.q)); this.tc.attach(this.proxy);
     } else this.tc.detach();
@@ -463,10 +473,10 @@ class App {
     const geo = new THREE.SphereGeometry(0.006, 10, 8), m = new THREE.MeshBasicMaterial({ color: 0x2563eb, depthTest: false, transparent: true, opacity: 0.8 });
     for (const P of this.M.parts) for (const pt of (this.tool === 'mate' ? connectors(P).filter(c => !c.line) : DEFS[P.type].pts(P.d))) { const s = new THREE.Mesh(geo, m); s.position.copy(ptW(P, pt.p)); s.renderOrder = 9; s.userData.helper = true; s.raycast = () => { }; g.add(s); }
   }
-  setTool(t) { if (this.mateS) this.mateCancel(); this.tool = t; this.pick1 = null; this.mate1 = null; this.hl2.visible = false; document.querySelectorAll('.tool').forEach(b => b.classList.toggle('sel', b.dataset.t === t)); this.updSel(); this.showPoints(); if (this.showToolBar) this.showToolBar();
+  setTool(t) { if (this.asm && t !== 'select') this.asmCancel(true); if (this.mateS) this.mateCancel(); this.tool = t; this.pick1 = null; this.mate1 = null; this.hl2.visible = false; document.querySelectorAll('.tool').forEach(b => b.classList.toggle('sel', b.dataset.t === t)); this.updSel(); this.showPoints(); if (this.showToolBar) this.showToolBar();
     if (t === 'mate') return this.msg('配合：先点击零件 A 上的面/连接点，再点击零件 B 上的面/连接点 → A 贴合到 B（法向相对），然后选择连接类型、偏移、角度');
     if (t === 'addcon') return this.msg('添加连接点：选择类型（孔/轴/安装面），在零件表面点击放置；Esc 完成');
-    this.msg(t === 'select' ? '选择/移动：左键拖动零件移动（靠近连接点自动装配），G 显示坐标轴' : (JT[t] ? JT[t] + '：依次点击两个零件的连接点（蓝点），第二下点地面=连接大地' : CT[t] + '：依次点击两个已用铰链/滑动副安装好的传动零件')); }
+    this.msg(t === 'select' ? '选择/移动：Ctrl/Shift+点击选两个零件 → 装配面板（J）；左键拖动零件移动，G 显示坐标轴' : (JT[t] ? JT[t] + '：依次点击两个零件的连接点（蓝点），第二下点地面=连接大地' : CT[t] + '：依次点击两个已用铰链/滑动副安装好的传动零件')); }
   // ---------------- edit drag (constraints kept) ----------------
   dragStart() {
     if (this.mode !== 'edit' || !this.sel || !this.sel.p) return;
@@ -654,7 +664,7 @@ class App {
   hideCtx() { const el = $('ctx'); if (el) el.style.display = 'none'; }
   // ---------------- run control ----------------
   startRun() {
-    if (this.mode === 'run') return;
+    if (this.mode === 'run') return; if (this.asm) this.asmCancel(true);
     if (this.mode === 'edit') { this.init = this.snapshot(); if (this.sim) this.sim.free(); this.sim = new Sim(this.M, { gravity: this.gravity }); this.sim.keys = this.keys; this.tracePts = []; this.plotData = []; this.pick1 = null; for (const k in this.cobjs) this.cobjs[k].s = 0; }
     if (this.flash) { this.flash.t0 = -1e9; this.updFlash(performance.now()); }
     this.mode = 'run'; this.tc.detach(); this.showPoints(); this.updButtons(); this.updProps(); const bk = [...this.boundKeys()].map(keyLabel); this.msg('运行中：真实3D物理（重力、碰撞、摩擦、电机）' + (bk.length ? '　键盘控制：' + bk.join(' / ') : ''));
@@ -688,7 +698,7 @@ class App {
     } else if (!this.drag) this.syncPoses();
     if (this.trialEnd && now > this.trialEnd) { this.trialEnd = 0; if (this.mode !== 'edit') this.reset(); }
     this.updFlash(now);
-    this.orbit.update(); this.renderer.render(this.scene, this.cam);
+    this.orbit.update(); if (this.asm) this.asmLabels(); this.renderer.render(this.scene, this.cam);
   }
   updFlash(now) {
     const F = this.flash, lbl = $('snapLbl'); if (!F) return;
@@ -853,14 +863,15 @@ class App {
     else if (e.shiftKey && this.sel && this.sel.p) { const rows = [...$('olList').querySelectorAll('.olr[data-pid]')].map(r => r.dataset.pid), a = rows.indexOf(this.sel.p), b = rows.indexOf(pid); const ms = new Set(this.msel || []); if (a >= 0 && b >= 0) for (let i = Math.min(a, b); i <= Math.max(a, b); i++) ms.add(rows[i]); this.msel = ms; this.select({ p: pid }, true); }
     else this.select({ p: pid });
     if (this.msel && this.msel.size > 1) this.msg('已选中 ' + this.msel.size + ' 个零件（Del 删除全部）');
+    if (e.ctrlKey || e.metaKey || e.shiftKey) this.asmAuto();
   }
   olRename(pid, span) {
     const P = this.part(pid); if (!P || this.mode !== 'edit') return; const inp = document.createElement('input'); inp.type = 'text'; inp.className = 'olin'; inp.value = P.name; span.replaceWith(inp); inp.focus(); inp.select();
     let done = false; const fin = ok => { if (done) return; done = true; const v = inp.value.trim(); if (ok && v && v !== P.name) { this.beginEdit(); P.name = v; this.commit(); this.updProps(); } this.renderOutliner(); };
     inp.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') fin(true); if (e.key === 'Escape') fin(false); }; inp.onblur = () => fin(true); inp.onclick = e => e.stopPropagation(); inp.ondblclick = e => e.stopPropagation();
   }
-  setHidden(pid, v) { const P = this.part(pid); if (!P) return; if (v) P.hidden = true; else delete P.hidden; if (this.objs[pid]) this.objs[pid].visible = !v; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.renderOutliner(); this.msg((v ? '已隐藏 ' : '已显示 ') + P.name + (v ? '（仍参与物理仿真；在组件栏点 ◌ 显示）' : '')); }
-  setLocked(pid, v) { const P = this.part(pid); if (!P) return; if (v) P.locked = true; else delete P.locked; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.updSel(); this.renderOutliner(); this.msg((v ? '已锁定 ' : '已解锁 ') + P.name + (v ? '：不能拖动/旋转（仍可选中和编辑属性）' : '')); }
+  setHidden(pid, v) { if (this.asm) this.asmCancel(true); const P = this.part(pid); if (!P) return; if (v) P.hidden = true; else delete P.hidden; if (this.objs[pid]) this.objs[pid].visible = !v; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.renderOutliner(); this.msg((v ? '已隐藏 ' : '已显示 ') + P.name + (v ? '（仍参与物理仿真；在组件栏点 ◌ 显示）' : '')); }
+  setLocked(pid, v) { if (this.asm) this.asmCancel(true); const P = this.part(pid); if (!P) return; if (v) P.locked = true; else delete P.locked; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.updSel(); this.renderOutliner(); this.msg((v ? '已锁定 ' : '已解锁 ') + P.name + (v ? '：不能拖动/旋转（仍可选中和编辑属性）' : '')); }
   deleteParts(ids) { if (this.mode !== 'edit') this.reset(); this.msel = new Set(ids); this.sel = { p: ids[0] }; this.deleteSel(); }
   focusPart(pid) {
     const o = this.objs[pid]; if (!o) return; const bb = new THREE.Box3().setFromObject(o); if (bb.isEmpty()) return;
@@ -873,6 +884,9 @@ class App {
     if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
     const k = e.key.toLowerCase();
     if (this.runKey(e, true)) return;
+    if (this.asm && k === 'enter') { e.preventDefault(); this.asmCommit(); return; }
+    if (this.asm && k === 'escape') { this.asmCancel(); return; }
+    if (k === 'j' && !e.ctrlKey && !e.metaKey && !e.altKey) { this.asmToggle(); return; }
     if (e.code === 'Space') { e.preventDefault(); this.toggleRun(); }
     else if ((e.ctrlKey || e.metaKey) && k === 'g') { e.preventDefault(); if (e.shiftKey) this.ungroupSel(); else this.groupSel(); }
     else if (k === 'g' && !e.ctrlKey && !e.metaKey && !e.altKey) this.toggleGizmo(e.shiftKey ? 'rotate' : null);
@@ -919,7 +933,7 @@ class App {
     const num = (label, val, u, set, step = 'any') => { const r = row(label, `<input type="number" step="${step}" value="${+(+val).toFixed(5)}" ${ed ? '' : 'disabled'}>`, u); if (set) r.querySelector('input').onchange = e => { this.beginEdit(); set(+e.target.value); this.commit(); this.rebuild(); }; return r; };
     if (this.sel && this.sel.p && this.msel && this.msel.size > 1) { this.multiPanel(el, this.selIds()); return; }
     if (!this.sel) {
-      el.innerHTML = `<div class="title">装配概览</div><div style="color:#6b7280;line-height:1.6">零件 ${this.M.parts.length} 个，连接 ${this.M.joints.length} 个，传动 ${this.M.couplings.length} 个。<br>中键拖动=旋转视角，右键拖动=平移，滚轮=缩放，左键=选择/拖动零件。左键直接拖动零件移动（靠近连接点自动装配，可吸附到杆身/板面任意位置），R 旋转 15°（Shift+R 反向）；需要精确移动时按 G 显示坐标轴。🧲 配合(M)：两次点击把零件面贴面装配。📥 导入零件：STL/OBJ/GLB。Ctrl/Shift+点击多选 → 组合 / 复制 / 镜像。</div>`;
+      el.innerHTML = `<div class="title">装配概览</div><div style="color:#6b7280;line-height:1.6">零件 ${this.M.parts.length} 个，连接 ${this.M.joints.length} 个，传动 ${this.M.couplings.length} 个。<br>中键拖动=旋转视角，右键拖动=平移，滚轮=缩放，左键=选择/拖动零件。<b>装配：Ctrl/Shift+点击 选中两个或多个零件 → 右侧出现“🔧 装配”面板（也可按 J）→ 选连接点（下拉列表或直接点模型）和连接类型（固定/铰链/滑动/球铰/齿轮啮合/皮带/链条/螺旋）→ 确定装配。</b>选中零件只显示高亮，不显示坐标轴；左键直接拖动零件可移动（靠近连接点仍会自动吸附，可在顶栏关闭“自动连接”），R 旋转 15°（Shift+R 反向）；需要精确移动时按 G 显示坐标轴（换选零件后自动隐藏）。🧲 配合(M)：两次点击把零件面贴面装配。📥 导入零件：STL/OBJ/GLB。Ctrl/Shift+点击多选 → 组合 / 复制 / 镜像。</div>`;
       this.listJoints(el, this.M.joints, this.M.couplings); return;
     }
     if (this.sel.p) {
@@ -1059,6 +1073,7 @@ class App {
   }
   // ---------------- presets / IO ----------------
   loadPreset(i) {
+    if (this.asm) this.asmCancel(true);
     if (this.sim) { this.sim.free(); this.sim = null; } this.mode = 'edit'; const old = this.snapshot();
     this.M = { parts: [], joints: [], couplings: [], nid: 1 };
     const api = {
@@ -1074,6 +1089,7 @@ class App {
   }
   save() { this.download('机械装配3D.json', JSON.stringify(this.saveData()), 'application/json'); this.msg('已保存 JSON'); }
   loadJSON(t) {
+    if (this.asm) this.asmCancel(true);
     try { const o = typeof t === 'string' ? JSON.parse(t) : t, M = o.model || o; if (!M.parts) throw new Error('无 parts'); const gs = o.geos || M.geos; if (gs) Object.assign(GEO, gs); delete M.geos; const miss = M.parts.filter(P => P.type === 'mesh' && !GEO[P.d.g]).length; if (miss) this.msg('警告：' + miss + ' 个导入零件缺少几何数据', true); if (this.sim) { this.sim.free(); this.sim = null; } this.mode = 'edit'; this.undoS.push(this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.M = M; M.couplings = M.couplings || []; this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.updButtons(); if (o.camera) { this.cam.position.fromArray(o.camera.p); this.orbit.target.fromArray(o.camera.t); } else this.fit(); this.msg('已读取装配：' + M.parts.length + ' 个零件'); }
     catch (e) { this.msg('读取失败：' + e.message, true); }
   }
@@ -1104,6 +1120,7 @@ class App {
   computeResize(snap, pid, changes) { const M0 = JSON.parse(snap), P = M0.parts.find(p => p.id === pid); if (!P) return { ok: false, msg: '零件不存在' }; return resizeModel(M0, pid, Object.assign({}, P.d, changes)); }
   /** live preview (no undo entry): always recomputed from the state before the edit started */
   resizeLive(pid, changes) {
+    if (this.asm) this.asmCancel(true);
     if (this.mode !== 'edit') this.reset();
     if (!this._rs || this._rs.pid !== pid) this._rs = { pid, snap: this.snapshot() };
     const r = this.computeResize(this._rs.snap, pid, changes);
@@ -1114,6 +1131,7 @@ class App {
   resizeCancel() { if (this._rs) { this.M = JSON.parse(this._rs.snap); this._rs = null; this.rebuild(); } }
   /** apply a resize as one undo step; returns the result ({ok, gap, strategy, msg}) */
   resizeCommit(pid, changes) {
+    if (this.asm) this.asmCancel(true);
     if (this.mode !== 'edit') this.reset();
     const base = this._rs && this._rs.pid === pid ? this._rs.snap : this.snapshot(); this._rs = null;
     const r = this.computeResize(base, pid, changes);
@@ -1148,4 +1166,5 @@ class App {
 }
 
 installExtra(App);
+installAsm(App);
 RAPIER.init().then(() => { window.app = new App(); window.dispatchEvent(new Event('app-ready')); }).catch(e => { console.error(e); document.body.insertAdjacentHTML('beforeend', '<div style="position:fixed;top:40%;left:30%;background:#fee;padding:20px">物理引擎加载失败: ' + e + '</div>'); });
