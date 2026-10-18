@@ -93,7 +93,11 @@ export function alignXf(T, te, tprm, F, fe, fprm, o = {}) {
   const L = tw.p.clone().addScaledVector(w, stand + (o.off || 0));
   return { R, pivot: fw.p.clone(), L, axis: Ax, D, w, tw, fw, stand };
 }
-function moveParts(parts, R, pivot, L) { for (const P of parts) { P.p = V3(P.p).sub(pivot).applyQuaternion(R).add(L).toArray(); P.q = R.clone().multiply(Q4(P.q)).normalize().toArray(); } }
+function moveParts(parts, R, pivot, L, M) {
+  for (const P of parts) { P.p = V3(P.p).sub(pivot).applyQuaternion(R).add(L).toArray(); P.q = R.clone().multiply(Q4(P.q)).normalize().toArray(); }
+  // ground joints (b = null) store their world anchor in lb: carry it along so the moved assembly stays consistent
+  if (M) { const ids = new Set(parts.map(P => P.id)); for (const j of M.joints) if (j.b == null && ids.has(j.a) && Array.isArray(j.lb)) j.lb = V3(j.lb).sub(pivot).applyQuaternion(R).add(L).toArray(); }
+}
 function ensureRot(app, P, axis, center) { if (!hasJoint(app.M, P.id, ['revolute'])) app.addJoint('revolute', P, null, center.clone(), axis.clone()); }
 const dummyCtx = { toScreen: v => new THREE.Vector2(v.x, v.y), cursor: null };
 function ghostify(o) { if (!o) return; o.traverse(m => { if (m.isMesh && m.material) { m.material = m.material.clone(); m.material.transparent = true; m.material.opacity = 0.55; m.castShadow = false; } }); }
@@ -160,7 +164,7 @@ export function installAsm(App) {
     else if (!cA.anchored) mv = 'a';
     else if (!gj(cB)) mv = 'b';
     else if (!gj(cA)) mv = 'a';
-    else info.note = '两侧都已连接到大地：不移动，直接建立连接';
+    else { mv = 'b'; info.note = '两侧都已连接到大地：整体移动 B 所在装配体（连同其接地连接）'; }
     if (mv === 'a') info.note = B.name + ' 所在装配体已固定，改为移动 ' + A.name;
     const F = mv === 'a' ? A : B, T = mv === 'a' ? B : A, comp = mv ? (mv === 'a' ? cA : cB) : null;
     const eA = asmEntries(A).find(e => e.key === pr.ka), eB = asmEntries(B).find(e => e.key === pr.kb);
@@ -170,7 +174,7 @@ export function installAsm(App) {
       let p0 = V3(G.p); if (pr.ang) p0 = p0.sub(hp).applyAxisAngle(nH, pr.ang * D2R).add(hp);
       const c = meshCandidate(dummyCtx, G, H, p0, Q4(G.q), hp, hq);
       if (!c) { info.err = '这两个零件不能啮合（需模数相同的直齿轮 / 齿条 / 蜗杆蜗轮 / 锥齿轮）'; return info; }
-      if (mv) moveParts(comp.parts, c.q.clone().multiply(Q4(G.q).invert()), V3(G.p), c.p.clone());
+      if (mv) moveParts(comp.parts, c.q.clone().multiply(Q4(G.q).invert()), V3(G.p), c.p.clone(), this.M);
       info.label = c.label; if (!c.apply(this)) info.err = '啮合失败（请检查两齿轮是否已用铰链安装）';
     } else if (t === 'belt' || t === 'chain') {
       const nT = axW(T, [0, 0, 1]), cT = V3(T.p), minD = pitchRadius(T) + pitchRadius(F) + 0.01;
@@ -179,7 +183,7 @@ export function installAsm(App) {
         let u = V3(F.p).sub(cT); u.addScaledVector(nT, -u.dot(nT)); const d0 = u.length(); if (d0 < 1e-6) u = V3(anyPerp(nT.toArray())); else u.normalize();
         if (pr.ang) u.applyAxisAngle(nT, pr.ang * D2R);
         const dist = pr.dist != null ? Math.max(minD, pr.dist) : Math.max(d0, minD + 0.04); info.dist = dist;
-        moveParts(comp.parts, R, V3(F.p), cT.clone().addScaledVector(u, dist));
+        moveParts(comp.parts, R, V3(F.p), cT.clone().addScaledVector(u, dist), this.M);
       } else info.dist = V3(F.p).distanceTo(cT);
       ensureRot(this, A, axW(A, [0, 0, 1]), V3(A.p)); ensureRot(this, B, axW(B, [0, 0, 1]), V3(B.p));
       if (!this.addCoupling(t, A, B)) info.err = '无法建立' + ATYPE[t];
@@ -191,7 +195,7 @@ export function installAsm(App) {
       const X = alignXf(T, te, tprm, F, fe, fprm, { axisW: t === 'prismatic' ? null : forced, flip: pr.flip, other: pr.other, off: pr.off, ang: pr.ang });
       if (mv) {
         if (fe.role && ['motorBase', 'mountBase'].includes(fe.role) && te.role === 'mount' && F.fixed && comp.parts.length === 1) F.fixed = false;
-        moveParts(comp.parts, X.R, X.pivot, X.L);
+        moveParts(comp.parts, X.R, X.pivot, X.L, this.M);
       }
       const anchor = mv ? X.L.clone() : X.tw.p.clone(); info.stand = X.stand;
       let jax = X.axis.clone();
@@ -213,7 +217,9 @@ export function installAsm(App) {
 
   // ---------------- open / preview / commit / cancel ----------------
   P.asmOpen = function (ids) {
-    if (this.mode !== 'edit') this.reset();
+    ids = ids || this.selIds();
+    const wasRun = this.mode !== 'edit'; this.asmPend = null;
+    if (wasRun) this.reset();
     if (this.asm) this.asmCancel(true);
     if (this.mateS) this.mateCancel(); if (this.tool !== 'select') this.setTool('select');
     ids = this.asmUnits(ids || this.selIds());
@@ -221,9 +227,9 @@ export function installAsm(App) {
     if (this.gizmoOn) { this.gizmoOn = false; this.updGizmoBtns(); }
     this._asmBusy = true; try { const ms = new Set(this.selIds()); ids.forEach(id => ms.add(id)); this.msel = ms; if (!this.sel || !this.sel.p || !ms.has(this.sel.p)) this.sel = { p: ids[ids.length - 1] }; } finally { this._asmBusy = false; }
     this.asm = { ids, mode: ids.length > 2 ? 'chain' : 'pair', snap: this.snapshot(), act: 0, hov: null, pairs: [], info: [] };
-    this.asmBuildPairs(); this.asmPreview(true);
+    this.asmBuildPairs(); this.asmPreview(true); this.asmReveal();
     const pr = this.asm.pairs[0];
-    this.msg(`装配：${this.part(pr.a).name} ⟵ ${this.part(pr.b).name}　已自动选择 ${ATYPE[pr.type]}，确认无误按“确定装配”（Enter），或在右侧面板 / 3D 模型上改选连接点`);
+    this.msg((wasRun ? '已停止仿真并回到初始状态（编辑模式）。' : '') + `装配：${this.part(pr.a).name} ⟵ ${this.part(pr.b).name}　已自动选择 ${ATYPE[pr.type]}，确认无误按“确定装配”（Enter），或在右侧面板 / 3D 模型上改选连接点`);
     return this.asm;
   };
   P.asmBase = function () { this.M = JSON.parse(this.asm.snap); };
@@ -267,7 +273,33 @@ export function installAsm(App) {
   };
   P.asmToggle = function () { if (this.asm) this.asmCancel(); else this.asmOpen(); };
   /** after a Ctrl/Shift multi-select: open the panel when 2+ parts are selected */
-  P.asmAuto = function () { if (this.mode !== 'edit') return; const u = this.asmUnits(this.selIds()); if (u.length >= 2) this.asmOpen(u); else if (this.asm) this.asmCancel(true); };
+  P.asmAuto = function () {
+    const u = this.asmUnits(this.selIds());
+    if (u.length >= 2) { if (this.mode === 'edit') this.asmOpen(u); else this.asmPending(u); }
+    else { if (this.asm) this.asmCancel(true); if (this.asmPend) this.asmPendClear(); }
+  };
+  /** run / pause mode: assembling needs the edit (initial) state -> show the panel with a clear "返回编辑并装配" button */
+  P.asmPending = function (ids) {
+    if (this.asm) this.asmCancel(true);
+    this.asmPend = ids.slice(); const el = $('asmPanel'); if (!el) return;
+    const nm = id => esc((this.part(id) || {}).name || '?'), t = this.sim ? this.sim.time : 0;
+    el.innerHTML = `<div class="asmHead">🔧 装配 <small>${ids.length} 个零件</small><span id="asmX" title="关闭">✕</span></div>`
+      + `<div class="asmPendMsg">已选中：<b>${ids.map(nm).join('、')}</b><br>仿真${this.mode === 'run' ? '正在运行' : '已暂停'}（t = ${t.toFixed(2)} s）。装配需要在编辑模式（初始状态）下进行。</div>`
+      + `<button class="bigAsm" id="asmGoEdit">↩ 返回编辑并装配</button><div class="hint2">点击后停止仿真、重置到初始状态，并打开装配面板（选连接点和连接类型 → 确定装配）。</div>`;
+    el.style.display = 'block'; el.classList.add('pend'); $('side').classList.add('asm'); $('btnAsm') && $('btnAsm').classList.add('on');
+    el.querySelector('#asmX').onclick = () => this.asmPendClear();
+    el.querySelector('#asmGoEdit').onclick = () => { const p = this.asmPend || ids; this.asmOpen(p); };
+    this.asmReveal();
+    this.msg('已选中 ' + ids.length + ' 个零件：仿真中不能直接装配，点右侧“返回编辑并装配”', true);
+  };
+  P.asmPendClear = function () { this.asmPend = null; const el = $('asmPanel'); if (el) el.classList.remove('pend'); if (!this.asm) this.asmClear(); };
+  /** keep the panel at the top of the right column and scrolled into view */
+  P.asmReveal = function () { const sd = $('side'), el = $('asmPanel'); if (!sd || !el) return; if (sd.firstElementChild !== el) sd.prepend(el); sd.scrollTop = 0; };
+  /** called from select(): keep the open / pending panel in sync with the selection */
+  P.asmSyncSel = function () {
+    if (this.asm) return this.asmSelChanged();
+    if (this.asmPend && !this._asmBusy) { const u = this.asmUnits(this.selIds()); if (u.length < 2) this.asmPendClear(); else if (u.length !== this.asmPend.length || u.some(x => !this.asmPend.includes(x))) this.asmPending(u); }
+  };
   /** selection changed by something else: close (and revert) the panel */
   P.asmSelChanged = function () {
     const S = this.asm; if (!S || this._asmBusy) return;
@@ -307,7 +339,7 @@ export function installAsm(App) {
   // ---------------- 3D markers ----------------
   P.asmClear = function () {
     if (this.asmFx) { this.scene.remove(this.asmFx); this.asmFx.traverse(o => { if (o.geometry) o.geometry.dispose(); }); this.asmFx = null; }
-    const el = $('asmPanel'); if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+    const el = $('asmPanel'); if (el) { el.style.display = 'none'; el.innerHTML = ''; el.classList.remove('pend'); } this.asmPend = null;
     $('side') && $('side').classList.remove('asm');
     for (const id of ['asmLblA', 'asmLblB']) { const l = $(id); if (l) l.style.display = 'none'; }
     const b = $('btnAsm'); if (b) b.classList.remove('on');
@@ -373,7 +405,7 @@ export function installAsm(App) {
     const S = this.asm, el = $('asmPanel'); if (!el) return; if (!S) { el.style.display = 'none'; return; }
     const focus = document.activeElement && el.contains(document.activeElement) ? document.activeElement.id : null;
     const nm = id => esc((this.part(id) || {}).name || '?');
-    $('side').classList.add('asm'); $('btnAsm') && $('btnAsm').classList.add('on');
+    $('side').classList.add('asm'); $('btnAsm') && $('btnAsm').classList.add('on'); el.classList.remove('pend');
     let h = `<div class="asmHead">🔧 装配 <small>${S.ids.length} 个零件</small><span id="asmX" title="取消 (Esc)">✕</span></div>`;
     if (S.ids.length > 2) h += `<div class="row"><label>方式</label><select id="asmMode"><option value="chain" ${S.mode === 'chain' ? 'selected' : ''}>依次连接 A→B→C…</option><option value="star" ${S.mode === 'star' ? 'selected' : ''}>全部连到第一个零件</option></select></div>`;
     S.pairs.forEach((pr, i) => {

@@ -114,6 +114,11 @@ button.small.run{background:#16a34a;color:#fff;border-color:#15803d}
 .item.mine{position:relative}.item .mdel{position:absolute;right:2px;top:0;color:#9ca3af;font-size:10px;cursor:pointer}.item .mdel:hover{color:#dc2626}
 .mpanel .row{display:flex;align-items:center;gap:6px;margin:4px 0}
 #side.asm{width:350px}
+#side.run #asmPanel{order:0}#side #asmPanel{flex:none}
+.bigAsm{display:block;width:100%;margin:6px 0;padding:8px 6px;font-size:15px;font-weight:700;color:#fff;background:#2563eb;border:1px solid #1d4ed8;border-radius:6px;cursor:pointer}.bigAsm:hover{background:#1d4ed8}
+#asmPanel .asmBtns{position:sticky;bottom:0;background:#eff6ff;padding:4px 0 6px;z-index:2;box-shadow:0 -4px 6px -4px rgba(37,99,235,.25)}
+@media (max-width:1180px){#topbar h1{display:none}#topbar{gap:4px;padding:4px 6px}.tb{padding:4px 6px}#topbar .sep{display:none}}
+#asmPanel .asmPendMsg{font-size:12px;color:#1e293b;line-height:1.6;margin:4px 0}
 #asmPanel{display:none;background:#eff6ff;border:2px solid #2563eb;border-radius:8px;padding:7px 8px;margin-bottom:8px;box-shadow:0 2px 8px rgba(37,99,235,.18)}
 #asmPanel .asmHead{font-weight:700;font-size:15px;color:#1e3a8a;display:flex;align-items:center;gap:6px;margin-bottom:4px}#asmPanel .asmHead small{color:#64748b;font-weight:400;font-size:12px}
 #asmX{margin-left:auto;cursor:pointer;color:#64748b;padding:0 4px}#asmX:hover{color:#dc2626}

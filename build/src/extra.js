@@ -298,7 +298,9 @@ export function installExtra(App) {
   P.multiPanel = function (el, ids) {
     const ed = this.mode === 'edit', grouped = ids.every(id => this.part(id).grp) && new Set(ids.map(id => this.part(id).grp)).size === 1;
     const g = grouped ? this.part(ids[0]).grp : null, gn = g && this.M.gnames && this.M.gnames[g];
-    el.innerHTML = `<div class="title">${grouped ? '组合：' + (gn || g) : '多选'}（${ids.length} 个零件）</div><div class="hint2">${ids.map(id => this.part(id).name).join('、')}</div>`;
+    el.innerHTML = `<div class="title">${grouped ? '组合：' + (gn || g) : '多选'}（${ids.length} 个零件）</div><div class="hint2">${ids.map(id => this.part(id).name).join('、')}</div>`
+      + `<button class="bigAsm" id="mAsm" title="打开装配面板 (J)：选连接点和连接类型，把选中的零件/装配体连接起来">🔧 装配选中零件</button>${ed ? '' : '<div class="hint2">仿真中：点击后停止仿真、回到初始状态再装配</div>'}`;
+    el.querySelector('#mAsm').onclick = () => { if (this.asm) this.asmReveal(); else this.asmOpen(ids); };
     if (!ed) return;
     const d = document.createElement('div'); d.className = 'mpanel';
     d.innerHTML = `${grouped ? '<button class="small" id="mUngrp">解除组合</button>' : '<button class="small run" id="mGrp">组合 (Ctrl+G)</button>'} <button class="small" id="mDup">复制 (Ctrl+D)</button>

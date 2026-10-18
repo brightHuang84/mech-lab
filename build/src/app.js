@@ -145,7 +145,7 @@ class App {
     }
     for (const j of this.M.joints) { const o = this.jointMarker(j); if (o) { o.userData.jid = j.id; this.fx.add(o); this.jobjs[j.id] = o; } }
     for (const c of this.M.couplings) if (c.type === 'belt' || c.type === 'chain') { const o = { c, s: 0 }; this.cobjs[c.id] = o; }
-    this.syncPoses(); this.updSel(); if (!keepProps) this.updProps(); this.updButtons(); this.updStatus(); this.showPoints(); this.renderOutliner();
+    this.syncPoses(); this.updSel(); if (!keepProps) this.updProps(); this.updButtons(); this.updStatus(); this.showPoints(); this.renderOutliner(); if (this.asmPend && !this.asm && this.asmSyncSel) this.asmSyncSel();
   }
   jointMarker(j) {
     const g = new THREE.Group(), col = { revolute: 0xf97316, prismatic: 0x10b981, fixed: 0x6366f1, spherical: 0xec4899, helical: 0xa855f7, spring: 0x0ea5e9, damper: 0x334155 }[j.type];
@@ -246,7 +246,7 @@ class App {
     const h = this.pickAt(e);
     if (this.mode !== 'edit' || this.tool === 'select') {
       if (h.jid) this.select({ j: h.jid });
-      else if (h.pid && (e.ctrlKey || e.metaKey || e.shiftKey) && this.mode === 'edit') { const ms = new Set(this.selIds()), g = this.groupOf(h.pid); if (ms.has(h.pid)) { g.forEach(id => ms.delete(id)); this.msel = ms; const nx = [...ms][0]; this.select(nx ? { p: nx } : null, true); } else { g.forEach(id => ms.add(id)); this.msel = ms; this.select({ p: h.pid }, true); } this.msg('已选中 ' + this.msel.size + ' 个零件（Ctrl/Shift+点击 增减；Ctrl+G 组合）'); this.asmAuto(); }
+      else if (h.pid && (e.ctrlKey || e.metaKey || e.shiftKey)) { const ms = new Set(this.selIds()), g = this.groupOf(h.pid); if (ms.has(h.pid)) { g.forEach(id => ms.delete(id)); this.msel = ms; const nx = [...ms][0]; this.select(nx ? { p: nx } : null, true); } else { g.forEach(id => ms.add(id)); this.msel = ms; this.select({ p: h.pid }, true); } this.msg('已选中 ' + this.msel.size + ' 个零件（Ctrl/Shift+点击 增减；Ctrl+G 组合）'); this.asmAuto(); }
       else if (h.pid) { const g = this.groupOf(h.pid); if (g.length > 1) { this.msel = new Set(g); this.select({ p: h.pid }, true); } else this.select({ p: h.pid }); }
       else this.select(null);
       return;
@@ -455,7 +455,7 @@ class App {
     const n = n0 - this.M.joints.length - this.M.couplings.length; this.commit(); this.rebuild(); this.select({ p: pid }); this.msg('已拆开 ' + P.name + '：移除 ' + n + ' 个连接/传动');
   }
   trialRun(sec = 3) { if (this.mode !== 'edit') this.reset(); this.startRun(); this.trialEnd = performance.now() + sec * 1000; this.msg('试运行 ' + sec + ' 秒…（结束后自动回到编辑状态）'); }
-  select(s, keepMulti) { if (!keepMulti) this.msel = new Set(s && s.p ? [s.p] : []); this.sel = s; this.tracePts = []; this.plotData = []; this.updSel(); this.updProps(); if (this.asm) this.asmSelChanged(); }
+  select(s, keepMulti) { if (!keepMulti) this.msel = new Set(s && s.p ? [s.p] : []); this.sel = s; this.tracePts = []; this.plotData = []; this.updSel(); this.updProps(); if (this.asm || this.asmPend) this.asmSyncSel(); }
   updSel() {
     const ms = this.msel || new Set();
     for (const id in this.objs) { const on = (this.sel && this.sel.p === id) || ms.has(id), hv = this.hoverPid === id; this.objs[id].traverse(o => { if (o.isMesh && o.material.emissive) { o.material.emissive.setHex(hv ? 0xf59e0b : on ? 0x1d4ed8 : o.userData.baseEm); o.material.emissiveIntensity = hv ? 0.45 : on ? 0.35 : 1; } }); }
@@ -668,13 +668,15 @@ class App {
     if (this.mode === 'edit') { this.init = this.snapshot(); if (this.sim) this.sim.free(); this.sim = new Sim(this.M, { gravity: this.gravity }); this.sim.keys = this.keys; this.tracePts = []; this.plotData = []; this.pick1 = null; for (const k in this.cobjs) this.cobjs[k].s = 0; }
     if (this.flash) { this.flash.t0 = -1e9; this.updFlash(performance.now()); }
     this.mode = 'run'; this.tc.detach(); this.showPoints(); this.updButtons(); this.updProps(); const bk = [...this.boundKeys()].map(keyLabel); this.msg('运行中：真实3D物理（重力、碰撞、摩擦、电机）' + (bk.length ? '　键盘控制：' + bk.join(' / ') : ''));
+    if (this.asmUnits && this.asmUnits(this.selIds()).length >= 2) this.asmPending(this.asmUnits(this.selIds()));
   }
-  pause() { if (this.mode !== 'run') return; this.mode = 'pause'; this.updButtons(); this.msg('已暂停：可“将当前运行状态设为初始状态”，或“重置”回编辑模式'); }
+  pause() { if (this.mode !== 'run') return; this.mode = 'pause'; this.updButtons(); this.msg('已暂停：可“将当前运行状态设为初始状态”，或“重置”回编辑模式'); if (this.asmPend) this.asmPending(this.asmPend); }
   toggleRun() { if (this.mode === 'run') this.pause(); else this.startRun(); }
   reset() {
     if (this.sim) { this.sim.free(); this.sim = null; }
     this.M = JSON.parse(this.init || this.snapshot()); this.lastSnap = this.snapshot(); this.mode = 'edit'; this.tracePts = []; this.plotData = [];
     this.rebuild(); this.updButtons(); this.msg('已重置到初始状态（编辑模式，可继续放置零件）');
+    if (this.asmPend) { this.asmPendClear(); this.asmAuto(); }
   }
   setInitial() { if (this.mode === 'pause' || this.mode === 'run') return this.setInitialFromRun(); this.init = this.snapshot(); this.msg('已将当前布局设为初始状态'); }
   setInitialFromRun() {
