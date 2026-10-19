@@ -10,11 +10,14 @@ import { installExtra, keyLabel } from './extra.js';
 import { GEO } from './parts.js';
 import { installAsm } from './asmpanel.js';
 import { installMove } from './move.js';
+import { geoMinY, groundFixModel, GROUND_TOL, GROUND_CLEAR } from './ground.js';
 
 const $ = id => document.getElementById(id);
 const tv3 = v => new THREE.Vector3(v.x, v.y, v.z), tq4 = q => new THREE.Quaternion(q.x, q.y, q.z, q.w);
+/** lowest world y of a part's actual geometry (mesh vertices; analytic collision shapes as fallback) */
+function partMinY(P) { return geoMinY(P, null, null, shapeMinY); }
 /** lowest world y of a part's collision shapes (analytic) */
-function partMinY(P) {
+function shapeMinY(P) {
   const q = Q4(P.q), p = V3(P.p); let lo = Infinity;
   for (const s of DEFS[P.type].shapes(P.d)) {
     const c = V3(s.pos || [0, 0, 0]).applyQuaternion(q).add(p); let e = 0;
@@ -134,10 +137,10 @@ class App {
     this.M.couplings.push(c); return c;
   }
   snapshot() { return JSON.stringify(this.M); }
-  commit() { if (this.mode === 'edit' && this.pruneAutoHinges) this.pruneAutoHinges(); this.undoS.push(this.lastSnap || this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.redoS = []; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.updButtons(); }
+  commit() { if (this.mode === 'edit' && this.pruneAutoHinges) this.pruneAutoHinges(); if (this.mode === 'edit') this.groundFix(); this.undoS.push(this.lastSnap || this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.redoS = []; this.lastSnap = this.snapshot(); if (this.mode === 'edit') this.init = this.lastSnap; this.updButtons(); }
   beginEdit() { if (this.asm && !this._asmBusy) this.asmCancel(true); if (this.mode !== 'edit') this.reset(); this.lastSnap = this.snapshot(); }
-  undo() { if (this.asm) return this.asmCancel(); if (this.mode !== 'edit') this.reset(); if (!this.undoS.length) return; this.redoS.push(this.snapshot()); this.M = JSON.parse(this.undoS.pop()); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已撤销'); }
-  redo() { if (this.asm) this.asmCancel(true); if (this.mode !== 'edit') this.reset(); if (!this.redoS.length) return; this.undoS.push(this.snapshot()); this.M = JSON.parse(this.redoS.pop()); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已重做'); }
+  undo() { if (this.asm) return this.asmCancel(); if (this.mode !== 'edit') this.reset(); if (!this.undoS.length) return; this.redoS.push(this.snapshot()); this.M = JSON.parse(this.undoS.pop()); this.groundFix({ quiet: true }); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已撤销'); }
+  redo() { if (this.asm) this.asmCancel(true); if (this.mode !== 'edit') this.reset(); if (!this.redoS.length) return; this.undoS.push(this.snapshot()); this.M = JSON.parse(this.redoS.pop()); this.groundFix({ quiet: true }); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已重做'); }
   // ---------------- scene build ----------------
   rebuild(keepProps) {
     this.root.clear(); this.fx.clear(); this.objs = {}; this.jobjs = {}; this.cobjs = {};
@@ -168,11 +171,13 @@ class App {
     return g;
   }
   livePose(id) {
-    if (this.dragPoses && this.dragPoses[id]) return this.dragPoses[id];
+    const L = this.mode === 'edit' && this._lift && this._lift[id];
+    if (this.dragPoses && this.dragPoses[id]) { const d = this.dragPoses[id]; return L ? { p: d.p.clone().setY(d.p.y + L), q: d.q } : d; }
     if (this.mode !== 'edit' && this.sim) return this.sim.partPose(id);
-    const P = this.part(id); return P ? { p: V3(P.p), q: Q4(P.q) } : null;
+    const P = this.part(id); if (!P) return null; const o = { p: V3(P.p), q: Q4(P.q) }; if (L) o.p.y += L; return o;
   }
   syncPoses() {
+    this.computeLiveLift();
     for (const P of this.M.parts) { const o = this.objs[P.id], ps = this.livePose(P.id); if (o && ps) { o.position.copy(ps.p); o.quaternion.copy(ps.q); } }
     const X = new THREE.Vector3(), Yv = new THREE.Vector3(0, 1, 0);
     const wpt = (pid, l) => { const ps = this.livePose(pid); return V3(l).applyQuaternion(ps.q).add(ps.p); };
@@ -295,8 +300,10 @@ class App {
   }
   relaxAll() {
     // close any gaps: relax every dynamic body with joints in the edit world
-    const s = new Sim(this.M, { edit: true }); if (s.maxGap() > 2e-4) { for (let i = 0; i < 40 && s.maxGap() > 1e-4; i++) s.relax(10); for (const P of this.M.parts) { const ps = s.partPose(P.id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); } this.lastSnap = this.snapshot(); this.init = this.lastSnap; }
+    const s = new Sim(this.M, { edit: true }); let ch = false; if (s.maxGap() > 2e-4) { for (let i = 0; i < 40 && s.maxGap() > 1e-4; i++) s.relax(10); for (const P of this.M.parts) { const ps = s.partPose(P.id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); } ch = true; }
     s.free();
+    if (this.mode === 'edit' && this.groundFix({ quiet: true }).dy > 0) ch = true;
+    if (ch) { this.lastSnap = this.snapshot(); this.init = this.lastSnap; }
   }
   placePart(type, gp, over, asm) {
     this.beginEdit();
@@ -349,7 +356,7 @@ class App {
     lbl.textContent = txt;
     this.hl.position.copy(c.marker); this.hl.scale.setScalar(best ? 1.6 : 1); this.hl.visible = true; this.snapTarget = best;
   }
-  clearPreview() { this.showPreview(null, null, null); }
+  clearPreview() { const had = !!this._palLift; this._palLift = null; this.showPreview(null, null, null); if (had) this.syncPoses(); }
   ghostFor(type, P) {
     if (!this._ghosts) this._ghosts = {};
     const key = type + JSON.stringify(P.d); if (this._ghosts[key]) return this._ghosts[key];
@@ -365,7 +372,14 @@ class App {
     g.quaternion.copy(q0); g.position.set(0, 0, 0); g.updateMatrixWorld(true); const bbr = new THREE.Box3().setFromObject(g);
     if (this.autoOn(ev)) { const r = findAssembly({ M: this.M, mover: P, p0: null, q0, ray: this.rayOf(ev), cursor: new THREE.Vector2(ev.clientX, ev.clientY), exclude: new Set(), toScreen: v => this.toScreen(v), camPos: this.cam.position }); best = r.best; near = r.near; }
     void bb; if (best) { g.position.copy(best.p); g.quaternion.copy(best.q); } else { g.position.set(gp.x, -bbr.min.y + 0.0005, gp.z); g.quaternion.copy(q0); }
-    this.showPreview(best, near, g);
+    // snapped ghost (and the assembly it snaps onto) never below the floor: preview the lift the drop will apply
+    this._palLift = null;
+    if (best && best.target && this.part(best.target.id)) {
+      const an = analyze(this.M), ids = an.comps[an.compOf[best.target.id]].parts.map(p => p.id);
+      const lo = Math.min(geoMinY(P, best.p, best.q, shapeMinY), ...ids.map(id => partMinY(this.part(id))));
+      if (lo < -GROUND_TOL) { const dy = -lo + GROUND_CLEAR; g.position.y += dy; this._palLift = {}; for (const id of ids) this._palLift[id] = dy; }
+    }
+    this.showPreview(best, near, g); this.syncPoses();
     return best;
   }
   // ---------------- direct pointer drag of parts ----------------
@@ -630,11 +644,39 @@ class App {
     else if (D.sim) { const s = D.sim; s.pb[D.pid].body.setBodyType(RAPIER.RigidBodyType.Dynamic, true); for (let i = 0; i < 60 && s.maxGap() > 1e-4; i++) s.relax(5); for (const P of this.M.parts) { const ps = s.partPose(P.id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); } s.free(); }
     this.dragPoses = null; this.clearPreview(); if (Math.abs(D.ang) > 1e-6) this.commit(); this.rebuild(); this.select({ p: D.pid });
   }
-  /** a free (not anchored) assembly must not sink into the floor after assembling: lift it so its lowest point sits on y = 0 */
-  liftComp(pid) {
-    const an = analyze(this.M), comp = an.comps[an.compOf[pid]]; if (!comp || comp.anchored) return;
-    let lo = Infinity; for (const P of comp.parts) lo = Math.min(lo, partMinY(P));
-    if (lo < -0.0003) { for (const P of comp.parts) P.p[1] += -lo + 0.0005; }
+  /** the assembly containing pid must not sink into the floor (free OR anchored — the floor is solid): lift it rigidly, with its ground anchors */
+  liftComp(pid) { return groundFixModel(this.M, [pid]).dy; }
+  /** post-edit ground hook: lift every assembly whose geometry is below y = 0 (relative poses / joints kept, ground anchors move along).
+   *  o.only: restrict to the assemblies containing these ids; o.quiet: no toast. Returns { dy, lifted } */
+  groundFix(o = {}) {
+    if (!this.M || !this.M.parts.length) return { dy: 0, lifted: [] };
+    const r = groundFixModel(this.M, o.only);
+    if (r.dy > 0.001 && !o.quiet && !this._quietGround) this.toast('已抬升至地面以上（↑' + (r.dy * 1000).toFixed(1) + ' mm）');
+    return r;
+  }
+  /** brief toast over the viewport */
+  toast(t, ms = 1800) {
+    let el = $('gToast'); const c = $('center'); if (!c) return;
+    if (!el) { el = document.createElement('div'); el.id = 'gToast'; el.style.cssText = 'position:absolute;left:50%;top:14px;transform:translateX(-50%);background:rgba(15,23,42,.88);color:#fde68a;padding:6px 14px;border-radius:6px;font-size:13px;z-index:40;pointer-events:none;transition:opacity .3s;opacity:0'; c.appendChild(el); }
+    el.textContent = t; el.style.opacity = '1'; this.lastToast = t; this.lastToastT = performance.now(); clearTimeout(this._toastT); this._toastT = setTimeout(() => { el.style.opacity = '0'; }, ms);
+  }
+  /** live (drag / palette) preview: per-part vertical offsets so the previewed assemblies stay above the floor (model untouched) */
+  computeLiveLift() {
+    this._lift = null;
+    if (this.mode === 'edit' && this._palLift) { this._lift = this._palLift; return; }
+    if (this.mode !== 'edit' || !this.dragPoses || !Object.keys(this.dragPoses).length) return;
+    const an = analyze(this.M), dp = this.dragPoses, groups = new Map();
+    const tgt = this.snapTarget && this.snapTarget.target ? this.snapTarget.target.id : null, mover = (this.pd && this.pd.pid) || (this.drag && this.drag.pid) || null;
+    for (const id of Object.keys(dp)) { if (!this.part(id)) continue; const c = an.compOf[id]; if (!groups.has(c)) groups.set(c, new Set()); }
+    if (tgt && mover && an.compOf[tgt] != null && an.compOf[mover] != null) { const a = an.compOf[mover], b = an.compOf[tgt]; groups.set(a, new Set([b])); groups.set(b, groups.get(b) || new Set()); }
+    const out = {}, used = new Set();
+    for (const [c, extra] of groups) {
+      if (used.has(c)) continue; const cs = [c, ...extra]; cs.forEach(x => used.add(x));
+      const ids = cs.flatMap(x => (an.comps[x] ? an.comps[x].parts.map(p => p.id) : []));
+      let lo = Infinity; for (const id of ids) { const P = this.part(id), ps = dp[id]; lo = Math.min(lo, ps ? geoMinY(P, ps.p, ps.q, shapeMinY) : partMinY(P)); }
+      if (isFinite(lo) && lo < -GROUND_TOL) { const dy = -lo + GROUND_CLEAR; for (const id of ids) out[id] = dy; }
+    }
+    if (Object.keys(out).length) this._lift = out;
   }
   // ---------------- joint editing ----------------
   jointById(id) { return this.M.joints.find(j => j.id === id); }
@@ -1114,15 +1156,15 @@ class App {
       C: (t, A, B, e) => this.addCoupling(t, A, B, e),
       rod: (p1, p2, o = {}) => { const a = V3(p1), b = V3(p2), d = b.clone().sub(a); const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), d.clone().normalize()); o.d = Object.assign({ L: d.length() }, o.d || {}); return this.newPart('rod', a.clone().add(b).multiplyScalar(0.5).toArray(), q.toArray(), o); },
     };
-    if (PRESETS[i].app) { const u = this.undoS; this.undoS = []; this.lastSnap = this.snapshot(); try { PRESETS[i].build(this); } finally { this.undoS = u; } } else PRESETS[i].build(api);
-    this.undoS.push(old); if (this.undoS.length > 200) this.undoS.shift(); this.redoS = []; this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set();
+    if (PRESETS[i].app) { const u = this.undoS; this.undoS = []; this.lastSnap = this.snapshot(); this._quietGround = true; try { PRESETS[i].build(this); } finally { this.undoS = u; this._quietGround = false; } } else PRESETS[i].build(api);
+    this.groundFix({ quiet: true }); this.undoS.push(old); if (this.undoS.length > 200) this.undoS.shift(); this.redoS = []; this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set();
     const tr = this.M.parts.find(p => p.trace); this.rebuild(); if (tr) this.select({ p: tr.id }); this.fit(); this.updButtons();
     this.msg('已载入示例：' + PRESETS[i].name + ' — ' + PRESETS[i].desc + '（按 Space 运行）');
   }
   save() { this.download('机械装配3D.json', JSON.stringify(this.saveData()), 'application/json'); this.msg('已保存 JSON'); }
   loadJSON(t) {
     if (this.asm) this.asmCancel(true);
-    try { const o = typeof t === 'string' ? JSON.parse(t) : t, M = o.model || o; if (!M.parts) throw new Error('无 parts'); const gs = o.geos || M.geos; if (gs) Object.assign(GEO, gs); delete M.geos; const miss = M.parts.filter(P => P.type === 'mesh' && !GEO[P.d.g]).length; if (miss) this.msg('警告：' + miss + ' 个导入零件缺少几何数据', true); if (this.sim) { this.sim.free(); this.sim = null; } this.mode = 'edit'; this.undoS.push(this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.M = M; M.couplings = M.couplings || []; this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.updButtons(); if (o.camera) { this.cam.position.fromArray(o.camera.p); this.orbit.target.fromArray(o.camera.t); } else this.fit(); this.msg('已读取装配：' + M.parts.length + ' 个零件'); }
+    try { const o = typeof t === 'string' ? JSON.parse(t) : t, M = o.model || o; if (!M.parts) throw new Error('无 parts'); const gs = o.geos || M.geos; if (gs) Object.assign(GEO, gs); delete M.geos; const miss = M.parts.filter(P => P.type === 'mesh' && !GEO[P.d.g]).length; if (miss) this.msg('警告：' + miss + ' 个导入零件缺少几何数据', true); if (this.sim) { this.sim.free(); this.sim = null; } this.mode = 'edit'; this.undoS.push(this.snapshot()); if (this.undoS.length > 200) this.undoS.shift(); this.M = M; M.couplings = M.couplings || []; M.joints = M.joints || []; const gl = this.groundFix({ quiet: true }); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.updButtons(); if (o.camera) { this.cam.position.fromArray(o.camera.p); this.orbit.target.fromArray(o.camera.t); } else this.fit(); this.msg('已读取装配：' + M.parts.length + ' 个零件' + (gl.dy > 0.001 ? '（低于地面的装配体已抬升至地面以上）' : '')); }
     catch (e) { this.msg('读取失败：' + e.message, true); }
   }
   bomCSV() {
@@ -1156,7 +1198,7 @@ class App {
     if (this.mode !== 'edit') this.reset();
     if (!this._rs || this._rs.pid !== pid) this._rs = { pid, snap: this.snapshot() };
     const r = this.computeResize(this._rs.snap, pid, changes);
-    this.M = r.ok ? r.M : JSON.parse(this._rs.snap); this.rebuild(true);
+    this.M = r.ok ? r.M : JSON.parse(this._rs.snap); if (r.ok) this.groundFix({ quiet: true }); this.rebuild(true);
     if (!r.ok) this.msg(r.msg, true); else this.msg('调整尺寸（预览）：' + this.part(pid).name + (r.notes && r.notes.length ? '；' + r.notes.join('；') : ''));
     return r;
   }

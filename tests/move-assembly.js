@@ -19,7 +19,8 @@ module.exports = async function (p, check, OUT) {
       spread(d) { return Math.max(...d.flatMap(v => v.map((x, k) => Math.abs(x - d[0][k])))); },
       qdiff(a, b) { return Math.max(...a.map((x, i) => 1 - Math.abs(x.q.reduce((s, v, k) => s + v * b[i].q[k], 0)))); },
       worldOk() { const A = app; let e = 0; for (const j of A.M.joints) if (j.b == null && j.type === 'fixed') { const P = A.part(j.a), w = new A._V(...j.la).applyQuaternion(new A.cam.quaternion.constructor(...P.q)).add(new A._V(...P.p)); e = Math.max(e, w.distanceTo(new A._V(...j.lb))); } return e; },
-      screen(pid) { const A = app, P = A.part(pid), s = A.toScreen(new A._V(...P.p)); for (let r = 0; r <= 90; r += 3) for (let a = 0; a < 6.28; a += 0.3) { const x = s.x + Math.cos(a) * r, y = s.y + Math.sin(a) * r, el = document.elementFromPoint(x, y); if (el && el.id === 'cv' && A.pickAt({ clientX: x, clientY: y }).pid === pid) return { x, y }; } return null; },
+      screen(pid) { const A = app, P = A.part(pid), s = A.toScreen(new A._V(...P.p)); // prefer a point well inside the part (not on an edge shared with a meshing gear)
+        for (const nb of [[[0, 0], [3, 0], [-3, 0], [0, 3], [0, -3]], [[0, 0]]]) for (let r = 0; r <= 90; r += 3) for (let a = 0; a < 6.28; a += 0.3) { const x = s.x + Math.cos(a) * r, y = s.y + Math.sin(a) * r, el = document.elementFromPoint(x, y); if (el && el.id === 'cv' && nb.every(([u, v]) => A.pickAt({ clientX: x + u, clientY: y + v }).pid === pid)) return { x, y }; } return null; },
     };
   });
   const R = {};

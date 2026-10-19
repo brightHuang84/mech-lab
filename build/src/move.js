@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { DEFS } from './parts.js';
 import { V3, Q4, analyze, isForce, axW, ptW, ptL, axL, planCoupling, Sim } from './physics.js';
+import { groundFixModel } from './ground.js';
 
 const D2R = Math.PI / 180;
 
@@ -33,14 +34,8 @@ export function installMove(App, partMinY) {
   };
   P.posesOf = function () { const s = {}; for (const Pp of this.M.parts) s[Pp.id] = { p: V3(Pp.p), q: Q4(Pp.q) }; return s; };
   /** nothing may end up below the floor: lift the moved set (with its world anchors) so its lowest point is at y = 0 */
-  P.groundLift = function (ids) {
-    let lo = Infinity; for (const id of ids) { const Pp = this.part(id); if (Pp && !DEFS[Pp.type].ground) lo = Math.min(lo, partMinY(Pp)); }
-    if (!(lo < -0.0005) || !isFinite(lo)) return 0;
-    const dy = -lo + 0.0005, set = new Set(ids);
-    for (const id of ids) this.part(id).p[1] += dy;
-    for (const j of this.M.joints) if (j.b == null && set.has(j.a)) j.lb = [j.lb[0], j.lb[1] + dy, j.lb[2]];
-    return dy;
-  };
+  //  (uses the parts' real geometry — mesh vertices — and lifts the whole connected assemblies touched by ids, see ground.js)
+  P.groundLift = function (ids) { return groundFixModel(this.M, ids).dy; };
   /** detach a part from everything (no commit) */
   P.detachJoints = function (id) {
     const before = this.M.joints.length + this.M.couplings.length;

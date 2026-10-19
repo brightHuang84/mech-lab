@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { DEFS, defaultMass, pitchRadius } from './parts.js';
 import { Sim, analyze, planCoupling, V3, Q4, ptW, axW, ptL, isForce } from './physics.js';
+import { geoMinY } from './ground.js';
 
 export const GAP_TOL = 0.0005; // 0.5 mm
 // axis index along which a long part is "a bar": interior anchors keep their distance from the nearer end
@@ -43,8 +44,10 @@ export function remapPoint(type, oldD, newD, l, keep, keepAxis = -1) {
   return out;
 }
 
+/** lowest world y of the part's real geometry (mesh vertices; collision shapes as fallback) */
+export function partMinY(P) { return geoMinY(P, null, null, shapeMinY); }
 /** lowest world y of the collision shapes */
-export function partMinY(P) {
+function shapeMinY(P) {
   const q = Q4(P.q), p = V3(P.p); let lo = Infinity;
   for (const s of DEFS[P.type].shapes(P.d)) {
     const c = V3(s.pos || [0, 0, 0]).applyQuaternion(q).add(p); let e = 0;

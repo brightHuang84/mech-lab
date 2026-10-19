@@ -216,7 +216,8 @@ export function installAsm(App) {
       }
     }
     info.jids = this.M.joints.slice(nj).map(j => j.id); info.cids = this.M.couplings.slice(nc).map(c => c.id);
-    if (mv) { info.moved = comp.parts.map(p => p.id); info.mover = F.id; this.liftComp(F.id); }
+    if (mv) { info.moved = comp.parts.map(p => p.id); info.mover = F.id; const dy = this.liftComp(F.id); if (dy > 0.001) info.lifted = dy; }
+    else if (!info.err) { const dy = this.liftComp(A.id); if (dy > 0.001) info.lifted = dy; }
     return info;
   };
 
@@ -249,6 +250,9 @@ export function installAsm(App) {
     try {
       this.M = JSON.parse(S.snap);
       S.info = S.pairs.map(pr => { try { return this.asmApplyPair(pr); } catch (e) { console.warn(e); return { err: String(e && e.message || e), moved: [], jids: [], cids: [] }; } });
+      // ground hook (same as on commit): the previewed result never sits below the floor
+      const gl = this.groundFix({ quiet: true }); S.lift = gl.dy;
+      if (gl.dy > 0.001) for (const inf of S.info) if (inf.moved && inf.moved.some(id => gl.lifted.includes(id))) inf.lifted = gl.dy;
       this.rebuild(true);
       const mv = new Set(S.info.flatMap(i => i.moved)); for (const id of mv) ghostify(this.objs[id]);
     } finally { this._asmBusy = false; }
@@ -402,6 +406,7 @@ export function installAsm(App) {
     if (inf.err) L.push(`<span class="asmErr">⚠ ${esc(inf.err)}</span>`);
     if (inf.mover) L.push(`移动：<b>${esc(nm(inf.mover))}</b>${inf.moved.length > 1 ? `（连同 ${inf.moved.length - 1} 个已连接零件整体移动）` : ''}`);
     if (inf.note) L.push(esc(inf.note));
+    if (inf.lifted) L.push('已抬升至地面以上（整个装配体 ↑' + (inf.lifted * 1000).toFixed(1) + ' mm，连接保持）');
     if (pr.type === 'gear' && inf.label) L.push(esc(inf.label) + '（自动计算：a = m(z₁+z₂)/2）');
     if ((pr.type === 'belt' || pr.type === 'chain') && inf.dist) L.push('中心距 ' + (inf.dist * 1000).toFixed(1) + ' mm');
     if (inf.stand) L.push('自动错开 ' + (inf.stand * 1000).toFixed(1) + ' mm（两零件厚度，避免重叠）');

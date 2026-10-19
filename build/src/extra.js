@@ -184,7 +184,7 @@ export function installExtra(App) {
   };
   P.mateApply = function () {
     const S = this.mateS; if (!S) return null; this.M = JSON.parse(S.snap);
-    const j = this.mateCore(S.r1, S.r2, S.o); S.j = j ? j.id : null; S.dup = !!(j && this._dupJoint === j.id); this._dupJoint = null; this.rebuild(true); this.updProps();
+    const j = this.mateCore(S.r1, S.r2, S.o); S.j = j ? j.id : null; S.dup = !!(j && this._dupJoint === j.id); this._dupJoint = null; if (j) this.groundFix({ quiet: true }); this.rebuild(true); this.updProps();
     if (j && S.dup) this.msg('这两个零件在这个位置已经有相同的连接，不会重复添加', true);
     else if (j) this.msg(`配合预览：${this.part(S.r1.pid).name} → ${this.part(S.r2.pid).name}（${({ fixed: '固定', revolute: '铰链', prismatic: '滑动', spherical: '球铰' })[S.o.type]}）。在上方工具条调整偏移/角度后点“确定”`);
     return j;
@@ -297,7 +297,7 @@ export function installExtra(App) {
       this.M.joints.push(J);
     }
     for (const c of this.M.couplings.slice()) if (set.has(c.pa) && set.has(c.pb) && jmap[c.ja] && jmap[c.jb]) { const C = JSON.parse(JSON.stringify(c)); C.id = 'c' + (this.M.nid++); C.pa = map[c.pa]; C.pb = map[c.pb]; C.ja = jmap[c.ja]; C.jb = jmap[c.jb]; this.M.couplings.push(C); }
-    this.commit(); if (mode === 'mirror' && o.ext) this.relaxAll(); else this.liftComp(map[ids[0]]); this.rebuild();
+    this.liftComp(map[ids[0]]); this.commit(); if (mode === 'mirror' && o.ext) this.relaxAll(); this.rebuild();
     const nids = ids.map(id => map[id]); this.msel = new Set(nids); this.select({ p: nids[0] }, true);
     this.msg((mode === 'mirror' ? '已镜像复制 ' : '已复制 ') + nids.length + ' 个零件、' + Object.keys(jmap).length + ' 个连接' + (mode === 'mirror' ? '（镜像平面 ' + 'XYZ'[k] + ' = ' + (at * 1000).toFixed(1) + ' mm）' : ''));
     return nids;
