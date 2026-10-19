@@ -234,7 +234,7 @@ class App {
   }
   // ---------------- interaction ----------------
   hover(e) {
-    if (this.asm && this.mode === 'edit' && !this.dragging()) { const h = this.pickAt(e, { parts: true }), r = h.pid ? this.asmNearest(h) : null; if (r) { this.hl.position.copy(r.w); this.hl.scale.setScalar(0.8); this.hl.visible = true; } else this.hl.visible = false; return; }
+    if (this.asm && this.mode === 'edit' && !this.dragging()) { this.hl.visible = false; this.asmHover(e); return; }
     if (this.mode !== 'edit' || this.tool === 'select') { if (!this.pick1) this.hl.visible = false; return; }
     const h = this.pickAt(e);
     if (this.tool === 'mate' || this.tool === 'addcon') { if (h.pid) { const r = this.tool === 'mate' ? this.mateRef(h) : null; this.hl.position.copy(r ? ptW(this.part(h.pid), r.p) : h.point); this.hl.scale.setScalar(0.7); this.hl.visible = true; } else this.hl.visible = false; return; }
@@ -249,6 +249,8 @@ class App {
     if (this.armed) { const gp = this.groundPoint(e); this.placePart(this.armed, gp); this.armed = null; document.querySelectorAll('.item.armed').forEach(x => x.classList.remove('armed')); return; }
     const mod = e.ctrlKey || e.metaKey || e.shiftKey;
     if (this.asm && this.mode === 'edit' && this.tool === 'select' && !mod) {
+      if (performance.now() - (this._asmNoClick || 0) < 250) return; // end of a drag along a shaft / face
+      if (this.asmClick(e)) return;
       const ha = this.pickAt(e, { parts: true }), pr = this.asm.pairs[this.asm.act];
       if (ha.pid && pr && (ha.pid === pr.a || ha.pid === pr.b)) { this.asmPickAt(ha); return; }
       if (!ha.pid) { this.msg('装配面板已打开：点击 A / B 零件可选取连接点；“确定装配”(Enter) 应用，“取消”(Esc) 关闭'); return; }
@@ -389,6 +391,7 @@ class App {
   ptrDown(e) {
     if (e.button === 1) { this.hideCtx(); return; } // middle button always orbits the camera (OrbitControls), even over a part
     if (e.button !== 0 || this.mode !== 'edit' || this.tool !== 'select' || this.armed || this.drag) return;
+    if (this.asm && this.asmPtrDown(e)) return; // 装配 panel open: drag along the chosen shaft / face, never drag A / B away
     if (this.tc.axis) return; // gizmo handle under the cursor
     const h = this.pickAt(e); if (!h.pid) return;
     if (this.part(h.pid).locked) return; // locked: click selects, drag does nothing
@@ -396,11 +399,12 @@ class App {
     this.orbit.enabled = false; this.pd = { pid: h.pid, x: e.clientX, y: e.clientY, hit: h.point.clone(), started: false, alt: !!(e.altKey || this.altDown), art: !!(e.ctrlKey || e.metaKey), vert: !!e.shiftKey };
   }
   ptrMove(e) {
+    if (this.asmScrub) { this.asmScrubMove(e); return; }
     const D = this.pd; if (!D) return;
     if (!D.started) { if (Math.hypot(e.clientX - D.x, e.clientY - D.y) < 5) return; D.started = true; if (this.asm) this.asmCancel(true); this.directStart(e); }
     this.directMove(e);
   }
-  ptrUp(e) { const D = this.pd; if (!D) return; this.pd = null; this.orbit.enabled = true; if (D.started) this.directEnd(D); } // (the canvas click handler already ran for this pointerup; setting tcDragged here used to swallow the NEXT click)
+  ptrUp(e) { if (this.asmScrub) { this.asmScrubEnd(); return; } const D = this.pd; if (!D) return; this.pd = null; this.orbit.enabled = true; if (D.started) this.directEnd(D); } // (the canvas click handler already ran for this pointerup; setting tcDragged here used to swallow the NEXT click)
   directStart(e) {
     const D = this.pd; this.lastSnap = this.snapshot(); const multi = !D.alt && !!(this.msel && this.msel.size > 1 && this.msel.has(D.pid)); this.select({ p: D.pid }, multi); this.tc.detach(); this.snapAlt = 0; this.rotInfo = ''; this.orbit.enableZoom = false;
     D.start = this.posesOf(); this.dragPoses = {}; D.multi = multi;
@@ -973,6 +977,7 @@ class App {
     if (this.runKey(e, true)) return;
     if (this.asm && k === 'enter') { e.preventDefault(); this.asmCommit(); return; }
     if (this.asm && k === 'escape') { this.asmCancel(); return; }
+    if (this.asm && k === 'tab') { e.preventDefault(); this.asmSetFocus((this.asm.focus || 'a') === 'a' ? 'b' : 'a'); return; }
     if (k === 'j' && !e.ctrlKey && !e.metaKey && !e.altKey) { this.asmToggle(); return; }
     if (this.mode === 'edit' && ['arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'pageup', 'pagedown'].includes(k) && !e.ctrlKey && !e.metaKey) { if (this.sel && this.sel.p) { e.preventDefault(); this.nudgeKey(k, e.shiftKey); } return; }
     if (e.code === 'Space') { e.preventDefault(); this.toggleRun(); }
