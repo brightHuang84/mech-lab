@@ -171,10 +171,12 @@ export function installAsm(App) {
     const nj = this.M.joints.length, nc = this.M.couplings.length, t = pr.type, nid0 = this.M.nid;
     if (t === 'gear') {
       const G = F, H = T, hq = Q4(H.q), hp = V3(H.p), nH = new THREE.Vector3(0, 0, 1).applyQuaternion(hq);
-      let p0 = V3(G.p); if (pr.ang) p0 = p0.sub(hp).applyAxisAngle(nH, pr.ang * D2R).add(hp);
-      const c = meshCandidate(dummyCtx, G, H, p0, Q4(G.q), hp, hq);
+      // bevel pairs: the azimuth (方位角) is applied after meshCandidate snaps the pitch-plane direction (exact 90°, no residual tilt)
+      const bev = G.type === 'bevel' && H.type === 'bevel', q0 = Q4(G.q).normalize();
+      let p0 = V3(G.p); if (pr.ang && !bev) p0 = p0.sub(hp).applyAxisAngle(nH, pr.ang * D2R).add(hp);
+      const c = meshCandidate(bev ? Object.assign({}, dummyCtx, { az: (pr.ang || 0) * D2R }) : dummyCtx, G, H, p0, q0, hp, hq);
       if (!c) { info.err = '这两个零件不能啮合（需模数相同的直齿轮 / 齿条 / 蜗杆蜗轮 / 锥齿轮）'; return info; }
-      if (mv) moveParts(comp.parts, c.q.clone().multiply(Q4(G.q).invert()), V3(G.p), c.p.clone(), this.M);
+      if (mv) moveParts(comp.parts, c.q.clone().multiply(q0.clone().invert()), V3(G.p), c.p.clone(), this.M);
       info.label = c.label; if (!c.apply(this)) info.err = '啮合失败（请检查两齿轮是否已用铰链安装）';
     } else if (t === 'belt' || t === 'chain') {
       const nT = axW(T, [0, 0, 1]), cT = V3(T.p), minD = pitchRadius(T) + pitchRadius(F) + 0.01;

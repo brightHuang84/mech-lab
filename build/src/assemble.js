@@ -213,8 +213,27 @@ function ensureRot(app, P, axisW, center) { if (!hasJoint(app.M, P.id, ['revolut
 function ensurePri(app, P, axisW, center) { if (!hasJoint(app.M, P.id, ['prismatic'])) app.addJoint('prismatic', P, null, center.clone(), axisW.clone()); }
 const planeProj = (v, n) => v.clone().addScaledVector(n, -v.dot(n));
 
+export const BEVEL_AZ_STEP = Math.PI / 12; // 15°
+/** orthonormal frame (e1, e2) of the plane ⟂ n: e1 horizontal when n is not vertical, else world X projected */
+export function pitchFrame(n) {
+  let e1 = n.clone().cross(new THREE.Vector3(0, 1, 0)); if (e1.length() < 0.3) e1 = planeProj(new THREE.Vector3(1, 0, 0), n);
+  e1.normalize(); const e2 = n.clone().cross(e1).normalize(); return { e1, e2 };
+}
+/** pose of bevel G meshing with H: local Z = nG exactly, teeth interleaved (zH·φ + zG·ψ ≡ π, φ = azimuth of nG in H's frame,
+ *  ψ = azimuth of nH in G's frame), roll about nG chosen closest to G's current roll (q0) so its assembly turns the least */
+export function bevelPose(G, H, nG, nH, hq, q0) {
+  const Z = new THREE.Vector3(0, 0, 1);
+  const ul = nG.clone().applyQuaternion(hq.clone().invert()), phi = Math.atan2(ul.y, ul.x), s = 2 * Math.PI / G.d.z;
+  const qb = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(nH.clone(), nG.clone().cross(nH).normalize(), nG.clone())); // X→nH, Z→nG
+  let psi = (Math.PI - H.d.z * phi) / G.d.z;
+  if (q0) { // current roll of G: azimuth of nH in G's frame after re-aiming its axis onto nG
+    const qa = new THREE.Quaternion().setFromUnitVectors(Z.clone().applyQuaternion(q0), nG).multiply(q0), xa = new THREE.Vector3(1, 0, 0).applyQuaternion(qa), ya = new THREE.Vector3(0, 1, 0).applyQuaternion(qa);
+    const psi0 = Math.atan2(nH.dot(ya), nH.dot(xa)); psi += Math.round((psi0 - psi) / s) * s; }
+  return qb.multiply(new THREE.Quaternion().setFromAxisAngle(Z, -psi)).normalize();
+}
 export function meshCandidate(ctx, G, H, p0, q0, hp, hq) {
-  const Z = new THREE.Vector3(0, 0, 1), nH = Z.clone().applyQuaternion(hq), toScreen = ctx.toScreen;
+  hq = hq.clone().normalize(); q0 = q0.clone().normalize();
+  const Z = new THREE.Vector3(0, 0, 1), nH = Z.clone().applyQuaternion(hq).normalize(), toScreen = ctx.toScreen;
   // probe point: palette -> cursor ray hit with H's mid plane; existing part -> its current centre
   const probe = n => { if (p0) return p0.clone(); const pl = new THREE.Plane().setFromNormalAndCoplanarPoint(n, hp), x = new THREE.Vector3(); return ctx.ray.intersectPlane(pl, x) ? x : null; };
   const dist = (pt) => toScreen(pt).distanceTo(ctx.cursor ? ctx.cursor : toScreen(p0));
@@ -264,11 +283,19 @@ export function meshCandidate(ctx, G, H, p0, q0, hp, hq) {
       apply: app => { ensureRot(app, H, aW, hp); ensureRot(app, G, nG, c); return app.addCoupling('gear', H, G); } };
   }
   if (G.type === 'bevel' && H.type === 'bevel' && sameM(G, H)) {
+    // 90° bevel pair: common apex O on H's axis; G's axis nG lies exactly in H's pitch plane (nG ⟂ nH).
+    // The azimuth of nG around nH comes from where G currently is, but G's centre is never exactly level with the apex
+    // (ground lift, stacking offsets ...): taking that residual as-is tilted the second shaft by a few degrees.
+    // -> snap the azimuth to a 15° grid of a stable world-derived frame (then add the panel's explicit azimuth ctx.az),
+    //    and build G's orientation from (nG, nH) directly, not from a rotation of its current q0.
     const rG = pitchRadius(G), rH = pitchRadius(H), O = hp.clone().addScaledVector(nH, -rG);
     const X = p0 ? p0.clone() : (() => { const x = new THREE.Vector3(); ctx.ray.closestPointToPoint(O, x); return x; })();
-    let nG = planeProj(X.clone().sub(O), nH); if (nG.length() < 1e-6) nG = new THREE.Vector3(1, 0, 0).applyQuaternion(hq); nG.normalize();
-    const c = O.clone().addScaledVector(nG, rH), q = new THREE.Quaternion().setFromUnitVectors(nG0, nG).multiply(q0);
-    q.multiply(new THREE.Quaternion().setFromAxisAngle(Z, Math.PI / G.d.z));
+    const { e1, e2 } = pitchFrame(nH);
+    let nG = planeProj(X.clone().sub(O), nH); if (nG.length() < 1e-6) nG = e1.clone(); nG.normalize();
+    const step = ctx.azStep != null ? ctx.azStep : BEVEL_AZ_STEP;
+    let az = Math.atan2(nG.dot(e2), nG.dot(e1)); if (step > 0) az = Math.round(az / step) * step; az += ctx.az || 0;
+    nG = e1.clone().multiplyScalar(Math.cos(az)).addScaledVector(e2, Math.sin(az)); nG.addScaledVector(nH, -nG.dot(nH)).normalize();
+    const c = O.clone().addScaledVector(nG, rH), q = bevelPose(G, H, nG, nH, hq, q0);
     return { dist: dist(c), p: c, q, label: '啮合 (锥齿轮 90°)', marker: c.clone(), target: H, kind: 'gear',
       apply: app => { H.d.A = rG; G.d.A = rH; H.p = O.clone().addScaledVector(nH, rG).toArray(); ensureRot(app, H, nH, v3(H.p)); ensureRot(app, G, nG, c); return app.addCoupling('gear', H, G); } };
   }

@@ -328,8 +328,8 @@ class App {
   rayOf(ev) { this.ray.setFromCamera(this.ndc(ev), this.cam); return this.ray.ray.clone(); }
   /** move the moving set so `mover` gets the snapped pose, then create the joints (all inside the current edit step) */
   applyAssembly(best, mover, ids) {
-    const p0 = V3(mover.p), q0 = Q4(mover.q), dq = best.q.clone().multiply(q0.clone().invert());
-    for (const id of ids) { const P = this.part(id); if (!P) continue; if (id === mover.id) { P.p = best.p.toArray(); P.q = best.q.toArray(); continue; } P.p = V3(P.p).sub(p0).applyQuaternion(dq).add(best.p).toArray(); P.q = dq.clone().multiply(Q4(P.q)).toArray(); }
+    const p0 = V3(mover.p), q0 = Q4(mover.q).normalize(), dq = best.q.clone().multiply(q0.clone().invert());
+    for (const id of ids) { const P = this.part(id); if (!P) continue; if (id === mover.id) { P.p = best.p.toArray(); P.q = best.q.toArray(); continue; } P.p = V3(P.p).sub(p0).applyQuaternion(dq).add(best.p).toArray(); P.q = dq.clone().multiply(Q4(P.q)).normalize().toArray(); }
     const nj = this.M.joints.length, nc = this.M.couplings.length;
     const jt = this.altType(best);
     const r = best.apply(this, jt);
