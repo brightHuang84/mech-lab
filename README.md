@@ -15,7 +15,7 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
 - `build/src/examples.js` – 四轮小车示例：只用通用零件、通过与用户相同的 API（mate / 组合 / 镜像 / 关节驱动）搭建
 - `build/src/app.js` – UI, scene, gizmo, tools, run/pause/reset/initial state, undo/redo, IO
 - `build/template.html`, `build/build.sh` – to rebuild: `cd build && npm ci && ./build.sh`
-- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 183 checks), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search); `tests/resize.js` (尺寸修改后连接保持贴合); `tests/features.js` (坐标轴开关、STL/OBJ/GLB 导入与存读、沿杆任意位置吸附、面贴合、配合、关节限位/弹簧编辑、组合镜像、四轮车行驶验证); `tests/asmpanel.js`（各种选中途径都不出现坐标轴、装配面板默认配对/对位/撤销/链式/预览取消，并生成两张截图）；测试模型在 `tests/fixtures/`
+- `tests/run-tests.js` – headless Chrome test suite (`node tests/run-tests.js`, 238 checks; wheel ground cases in `tests/ground-wheel.js`, shaft-length resize in `tests/resize-joints.js`), results in `tests/test-results.txt`; `tests/assembly.js` (snap assembly) and `tests/joints.js` (joint editing, context menu, Tab, view controls, R-key rotation, hand-built tricycle, preset connection audit) use real mouse/keyboard events; `tests/outliner.js` (组件栏 and palette search); `tests/resize.js` (尺寸修改后连接保持贴合); `tests/features.js` (坐标轴开关、STL/OBJ/GLB 导入与存读、沿杆任意位置吸附、面贴合、配合、关节限位/弹簧编辑、组合镜像、四轮车行驶验证); `tests/asmpanel.js`（各种选中途径都不出现坐标轴、装配面板默认配对/对位/撤销/链式/预览取消，并生成两张截图）；测试模型在 `tests/fixtures/`
 
 ## 鼠标与键盘操作
 | 操作 | 作用 |
@@ -188,6 +188,7 @@ It is one self-contained file (about 5 MB) with Three.js r186, OrbitControls/Tra
   - 位于零件表面上的（例如板顶面上的电机/轴承座）→ 仍在该表面上，水平偏移保持不变，但夹紧在新的板面范围内。
   - 轴、丝杠、蜗杆、连杆、齿条、从动件沿长度方向的中间位置（例如轴上中间的轮）→ 保持到最近一端的距离（在中心的保持居中），并夹紧在新长度内。
   - 铰链销沿自身轴线的位置（例如连杆厚度方向）在必要时保持不变，避免闭环机构在厚度方向错位。
+- **被约束的一侧不动（优先策略）**：每个连接在建立时（装配面板 / 🧲 配合 / 拖动吸附 / 连接工具）都记录参数化连接点（连接点名 + 沿轴位置 / 轴向偏移，`j.ref`）。改尺寸时，先看被改零件上的每个连接点连到哪里：连到大地/固定零件、连到电机/板/底座/轴承座等结构、连到有齿轮/皮带啮合的零件，或同一装配体从两处以上连到它 → 该连接点**保持世界位置不动**；若它在一端（例如电机输出端），这一端不动，零件只在另一端伸缩。其余（如轴端的轮）→ 端部的跟随端部、沿轴身的保持到最近一端的距离、其它保持到不动一侧的距离。两端都被约束无法同时保持、或啮合会脱开 → 拒绝并恢复原尺寸（中文提示）。
 - **哪一侧移动**：固定于大地的零件（以及与大地直接相连的连接）保持不动；被修改的零件和与之相连的自由零件按连接逐个平移，使每个连接重新重合，然后用编辑模式的约束求解（松弛）闭合剩余的环路（例如四连杆会重新求解姿态）。
   - 轴承座固定、轴另一端装轮：改轴长时轴承端不动，轮随轴的另一端移动。
   - 轴支承在**两个固定**的轴承座之间：轴以自身中心两端伸长/缩短，轴承座不动，轴端上的零件随端部移动；缩短到小于两轴承座跨距则无法装配 → 拒绝。

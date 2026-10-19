@@ -4,7 +4,7 @@ const OUT = '/workspace/mech-sandbox-3d/';
 (async () => {
   const b = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: 'new', args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--window-size=1500,900'] });
   const p = await b.newPage(); await p.setViewport({ width: 1500, height: 900 });
-  const errs = []; p.on('pageerror', e => errs.push('PAGEERR ' + e.message)); p.on('console', m => { if (m.type() === 'error') errs.push('CONSOLE ' + m.text()); });
+  const errs = []; p.on('pageerror', e => errs.push('PAGEERR ' + e.message)); p.on('console', m => { if (/safety net/.test(m.text())) console.log('NET ' + m.text()); if (m.type() === 'error') errs.push('CONSOLE ' + m.text()); });
   const url = 'file://' + OUT + 'index.html';
   await p.goto(url); await p.waitForFunction('window.app', { timeout: 60000 });
   const res = [];
@@ -101,6 +101,8 @@ const OUT = '/workspace/mech-sandbox-3d/';
   await require('./asmpanel-fix.js')(p, check, OUT);
   await require('./move-assembly.js')(p, check, OUT);
   await require('./ground.js')(p, check, OUT);
+  await require('./ground-wheel.js')(p, check, OUT);
+  await require('./resize-joints.js')(p, check, OUT);
   // screenshots
   const shot = async (name, js, t = 0, arg) => { await p.evaluate(js, arg); if (t) await new Promise(r => setTimeout(r, t)); await p.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))); await p.screenshot({ path: OUT + name }); console.log('saved ' + name); };
   await shot('screenshot-edit-gizmo.png', () => { const i = [...document.querySelectorAll('#selPreset option')].findIndex(o => o.textContent === '四连杆') - 1; app.loadPreset(i); app.view('iso'); app.fit(); app.select({ p: app.byName('连杆').id }); }, 300);

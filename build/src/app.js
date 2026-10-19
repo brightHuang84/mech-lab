@@ -5,7 +5,7 @@ import { DEFS, MATS, defaultMass, pitchRadius } from './parts.js';
 import { RAPIER, Sim, analyze, planCoupling, V3, Q4, ptW, axW, ptL, axL, isForce } from './physics.js';
 import { PRESETS } from './presets.js';
 import { findAssembly, connectors, SNAP_PX, JNAME } from './assemble.js';
-import { resizeModel, maxJointGap } from './resize.js';
+import { resizeModel, maxJointGap, anchorRef } from './resize.js';
 import { installExtra, keyLabel } from './extra.js';
 import { GEO } from './parts.js';
 import { installAsm } from './asmpanel.js';
@@ -128,6 +128,8 @@ class App {
     if (!isForce({ type }) && this.findDupJoint) { const d = this.findDupJoint(type, A, B, W); if (d) { this._dupJoint = d.id; return d; } } // never stack an identical joint twice
     const j = Object.assign({ id: 'j' + (this.M.nid++), type, a: A.id, b: B ? B.id : null, la: ptL(A, W).toArray(), lb: B ? ptL(B, W).toArray() : W.toArray(), axa: axL(A, n).toArray() }, over);
     if (type === 'spring') Object.assign(j, { k: 300, c: 0.5 }, over); if (type === 'damper') Object.assign(j, { c: 20 }, over);
+    // parametric anchor reference (connector name + position along it) so a later resize can recompute the anchor (resize.js)
+    if (!isForce(j) && !j.ref) { const ra = anchorRef(A, j.la), rb = B ? anchorRef(B, j.lb) : null; if (ra || rb) { j.ref = {}; if (ra) j.ref.a = ra; if (rb) j.ref.b = rb; } }
     this.M.joints.push(j); return j;
   }
   addCoupling(type, A, B, extra = {}) {
@@ -143,6 +145,7 @@ class App {
   redo() { if (this.asm) this.asmCancel(true); if (this.mode !== 'edit') this.reset(); if (!this.redoS.length) return; this.undoS.push(this.snapshot()); this.M = JSON.parse(this.redoS.pop()); this.groundFix({ quiet: true }); this.lastSnap = this.snapshot(); this.init = this.lastSnap; this.sel = null; this.msel = new Set(); this.rebuild(); this.msg('已重做'); }
   // ---------------- scene build ----------------
   rebuild(keepProps) {
+    this.groundNet('rebuild');
     this.root.clear(); this.fx.clear(); this.objs = {}; this.jobjs = {}; this.cobjs = {};
     for (const P of this.M.parts) {
       const g = DEFS[P.type].mesh(P.d, P); g.userData.pid = P.id; g.visible = !P.hidden; this.root.add(g); this.objs[P.id] = g; this.decorate(P, g);
@@ -311,7 +314,7 @@ class App {
     if (asm && asm.q) P.q = asm.q.toArray();
     const g = DEFS[type].mesh(P.d, P); g.quaternion.copy(Q4(P.q)); g.updateMatrixWorld(true); const bb = new THREE.Box3().setFromObject(g);
     const sn = v => this.snap ? Math.round(v / 0.01) * 0.01 : v;
-    P.p = [sn(gp.x), +(-bb.min.y + 0.0005).toFixed(4), sn(gp.z)];
+    void bb; P.p = [sn(gp.x), +(-geoMinY(P, [0, 0, 0], P.q, shapeMinY) + GROUND_CLEAR).toFixed(5), sn(gp.z)]; // exact geometry (a Box3 of a rotated wheel floats)
     let res = null;
     if (asm && asm.ray) { const r = findAssembly({ M: this.M, mover: P, p0: null, q0: Q4(P.q), ray: asm.ray, cursor: asm.cursor, exclude: new Set([P.id]), toScreen: v => this.toScreen(v), camPos: this.cam.position }); if (r.best) res = this.applyAssembly(r.best, P, [P.id]); }
     if (res) this.liftComp(P.id);
@@ -371,7 +374,7 @@ class App {
     this._palEv = { type, over, ev: { clientX: ev.clientX, clientY: ev.clientY, altKey: ev.altKey } }; const q0 = this.palRot || new THREE.Quaternion(); P.q = q0.toArray();
     g.quaternion.copy(q0); g.position.set(0, 0, 0); g.updateMatrixWorld(true); const bbr = new THREE.Box3().setFromObject(g);
     if (this.autoOn(ev)) { const r = findAssembly({ M: this.M, mover: P, p0: null, q0, ray: this.rayOf(ev), cursor: new THREE.Vector2(ev.clientX, ev.clientY), exclude: new Set(), toScreen: v => this.toScreen(v), camPos: this.cam.position }); best = r.best; near = r.near; }
-    void bb; if (best) { g.position.copy(best.p); g.quaternion.copy(best.q); } else { g.position.set(gp.x, -bbr.min.y + 0.0005, gp.z); g.quaternion.copy(q0); }
+    void bb; if (best) { g.position.copy(best.p); g.quaternion.copy(best.q); } else { g.position.set(gp.x, -geoMinY(P, [0, 0, 0], q0.toArray(), shapeMinY) + GROUND_CLEAR, gp.z); g.quaternion.copy(q0); void bbr; }
     // snapped ghost (and the assembly it snaps onto) never below the floor: preview the lift the drop will apply
     this._palLift = null;
     if (best && best.target && this.part(best.target.id)) {
@@ -654,6 +657,14 @@ class App {
     if (r.dy > 0.001 && !o.quiet && !this._quietGround) this.toast('已抬升至地面以上（↑' + (r.dy * 1000).toFixed(1) + ' mm）');
     return r;
   }
+  /** safety net on every rebuild / reset in edit mode: whatever path wrote the poses, nothing stays below the floor.
+   *  The regular hooks (commit / previews / undo …) should already have lifted it — if this one has to act, it logs which path slipped through. */
+  groundNet(where) {
+    if (this.mode !== 'edit' || !this.M || !this.M.parts.length || this._groundNetOff) return 0;
+    const r = groundFixModel(this.M);
+    if (r.dy > 1e-6) { const names = [...new Set(r.lifted)].map(id => (this.part(id) || {}).name).slice(0, 6).join('、'); (this.groundLog = this.groundLog || []).push({ where, dy: r.dy, ids: r.lifted.slice(), t: Date.now() }); if (this.groundLog.length > 50) this.groundLog.shift(); console.warn('[groundFix safety net] ' + where + ': lifted ' + names + ' by ' + (r.dy * 1000).toFixed(2) + ' mm'); }
+    return r.dy;
+  }
   /** brief toast over the viewport */
   toast(t, ms = 1800) {
     let el = $('gToast'); const c = $('center'); if (!c) return;
@@ -745,7 +756,9 @@ class App {
   toggleRun() { if (this.mode === 'run') this.pause(); else this.startRun(); }
   reset() {
     if (this.sim) { this.sim.free(); this.sim = null; }
-    this.M = JSON.parse(this.init || this.snapshot()); this.lastSnap = this.snapshot(); this.mode = 'edit'; this.tracePts = []; this.plotData = [];
+    this.M = JSON.parse(this.init || this.snapshot()); this.mode = 'edit'; this.tracePts = []; this.plotData = [];
+    // the initial state may come from a run pose (设为初始状态: contacts sink a few mm into the floor) or an old file: the floor is solid in edit mode
+    if (this.groundFix({ quiet: true }).dy > 0) this.init = this.snapshot(); this.lastSnap = this.snapshot();
     this.rebuild(); this.updButtons(); this.msg('已重置到初始状态（编辑模式，可继续放置零件）');
     if (this.asmPend) { this.asmPendClear(); this.asmAuto(); }
   }
@@ -753,6 +766,7 @@ class App {
   setInitialFromRun() {
     if (!this.sim) return; if (this.mode === 'run') this.pause();
     for (const P of this.M.parts) { const ps = this.sim.partPose(P.id); P.p = ps.p.toArray(); P.q = ps.q.toArray(); }
+    groundFixModel(this.M); // run poses rest ON the floor with a little contact penetration (wheels, gear teeth): store them lifted
     this.init = this.snapshot(); this.undoS.push(this.lastSnap || this.init); if (this.undoS.length > 200) this.undoS.shift(); this.lastSnap = this.init;
     this.msg('已将当前运行姿态设为初始状态（速度清零），重置后回到此姿态');
   }
